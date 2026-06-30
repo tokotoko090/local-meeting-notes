@@ -1,6 +1,6 @@
 import { Cpu, Download, FolderOpen, Mic, Play, Power, RefreshCcw, Square, Upload, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AudioDevice, BackendEvent, UpdateCheckResult } from "./vite-env";
+import type { AudioDevice, BackendEvent, GpuStatusResult, UpdateCheckResult } from "./vite-env";
 
 type RecordingState = "idle" | "recording" | "processing" | "complete" | "error";
 
@@ -81,6 +81,8 @@ export default function App() {
   const [updateStatus, setUpdateStatus] = useState("");
   const [updateBusy, setUpdateBusy] = useState(false);
   const [downloadedInstaller, setDownloadedInstaller] = useState("");
+  const [gpuStatus, setGpuStatus] = useState<GpuStatusResult | null>(null);
+  const [gpuBusy, setGpuBusy] = useState(false);
   const startedAt = useRef<number | null>(null);
   const lastEventId = useRef(0);
 
@@ -263,6 +265,31 @@ export default function App() {
     }
   }
 
+  async function refreshGpuStatus() {
+    try {
+      const result: GpuStatusResult = await apiCall("/api/gpu/status");
+      setGpuStatus(result);
+    } catch {
+      setGpuStatus({ ok: false, state: "cpu", label: "CPUで実行中", error: "GPU状態を確認できませんでした。" });
+    }
+  }
+
+  async function setupGpuRuntime() {
+    setGpuBusy(true);
+    setGpuStatus({ ok: true, state: "setting_up", label: "GPUセットアップ中", message: "GPU高速化コンポーネントを追加インストールしています。" });
+    try {
+      const result: GpuStatusResult = await apiCall("/api/gpu/setup", {});
+      setGpuStatus(result);
+      if (!result.ok) {
+        setError(result.error || "GPUセットアップに失敗しました。CPUで続行できます。");
+      } else {
+        setError("");
+      }
+    } finally {
+      setGpuBusy(false);
+    }
+  }
+
   async function checkForUpdates() {
     setUpdateBusy(true);
     setUpdateStatus("更新を確認しています...");
@@ -329,6 +356,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshDevices();
+    void refreshGpuStatus();
   }, []);
 
   const micDevices = devices.filter((device) => device.kind === "mic");
@@ -393,6 +421,30 @@ export default function App() {
           <button className="danger" type="button" onClick={shutdownApp} disabled={state === "recording" || state === "processing"} title="アプリを終了">
             <Power size={18} />
             終了
+          </button>
+        </div>
+      </section>
+
+      <section className="updateBar">
+        <div>
+          <h2>GPU高速化</h2>
+          <p>{gpuStatus?.error || gpuStatus?.message || "GPU状態を確認しています。"}</p>
+          <strong>{gpuStatus?.label || "確認中"}</strong>
+        </div>
+        <div className="updateActions">
+          <button className="secondary" type="button" onClick={refreshGpuStatus} disabled={gpuBusy || state === "recording" || state === "processing"} title="GPU状態を確認">
+            <RefreshCcw size={18} />
+            診断
+          </button>
+          <button
+            className="primary"
+            type="button"
+            onClick={setupGpuRuntime}
+            disabled={gpuBusy || state === "recording" || state === "processing" || !["setup_available", "setup_failed"].includes(gpuStatus?.state || "")}
+            title="このアプリ専用にGPU高速化コンポーネントを追加インストール"
+          >
+            <Download size={18} />
+            GPUセットアップ
           </button>
         </div>
       </section>

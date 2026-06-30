@@ -17,7 +17,6 @@ for package_name in ("faster_whisper", "tokenizers", "huggingface_hub", "onnxrun
 
 datas += collect_dynamic_libs("ctranslate2")
 datas += collect_dynamic_libs("onnxruntime")
-datas += collect_dynamic_libs("nvidia")
 
 hiddenimports = [
     "av",
@@ -29,10 +28,6 @@ hiddenimports = [
     "onnxruntime",
     "onnxruntime.capi",
     "onnxruntime.capi._pybind_state",
-    "nvidia",
-    "nvidia.cublas",
-    "nvidia.cuda_nvrtc",
-    "nvidia.cudnn",
     "pyaudiowpatch",
     "tokenizers",
 ]

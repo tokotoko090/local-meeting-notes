@@ -110,11 +110,13 @@ Windowsのサウンド設定でマイクが有効か確認してください。U
 
 `処理デバイス` が `cpu` の場合、長い会議では時間がかかります。NVIDIA GPUとCUDA環境が正しく入っているPCでは `auto` または `cuda` を試せます。
 
-インストーラー版にはCUDA文字起こしに必要な cuBLAS、cuDNN、NVRTC の補助DLLを同梱しています。ただし、NVIDIA GPU本体のドライバーはPC側に必要です。NVIDIAドライバーが古い、GPUがCUDAに対応していない、または別のCUDAエラーが出る場合は `cpu` に戻してください。CPUモードが最も互換性の高い設定です。
+インストーラー本体は軽量なCPU版です。NVIDIA GPUがあるPCでは、画面上部の `GPU高速化` で状態を診断できます。`GPUセットアップ可能` と表示された場合は、`GPUセットアップ` を押すと、このアプリ専用の管理フォルダにGPU高速化コンポーネントを追加インストールできます。
+
+システム全体のCUDAやPATHは変更しません。ただし、NVIDIA GPU本体のドライバーはPC側に必要です。NVIDIAドライバーが古い、GPUがCUDAに対応していない、または別のCUDAエラーが出る場合は `cpu` に戻してください。CPUモードが最も互換性の高い設定です。
 
 ### `cublas64_12.dll is not found or cannot be loaded` と表示される
 
-古いインストーラー版では、CUDA文字起こしに必要な cuBLAS DLL が同梱されていない場合があります。最新版へアップデートしてください。
+`GPU高速化` の `GPUセットアップ` を実行してください。ダウンロードに失敗した場合やオフライン環境では、CPUでそのまま利用できます。
 
 ### `Applying the VAD filter requires the onnxruntime package` と表示される
 

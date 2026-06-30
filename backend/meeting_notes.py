@@ -21,6 +21,8 @@ from typing import Any
 APP_VERSION = "0.2.3"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+DEFAULT_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"
+GPU_RUNTIME_ROOT = Path(os.environ.get("LOCAL_MEETING_NOTES_GPU_RUNTIME", str(DEFAULT_APP_DATA_ROOT / "gpu-runtime")))
 SAMPLE_RATE = 48_000
 CHANNELS = 2
 FRAMES_PER_BUFFER = 2048
@@ -49,6 +51,7 @@ def configure_cuda_dll_paths() -> list[str]:
     paths: list[str] = []
     nvidia_roots = [
         *(Path(site_path) / "nvidia" for site_path in site.getsitepackages()),
+        GPU_RUNTIME_ROOT / "nvidia",
         RESOURCE_ROOT / "nvidia",
         Path(sys.executable).resolve().parent / "nvidia",
     ]
@@ -74,6 +77,21 @@ def configure_cuda_dll_paths() -> list[str]:
             except OSError:
                 pass
     return paths
+
+
+def classify_cuda_error(error: Exception) -> tuple[str, str]:
+    detail = str(error)
+    lowered = detail.lower()
+    if "cublas64_12.dll" in lowered or "cudnn" in lowered or "nvrtc" in lowered:
+        return (
+            "gpu_runtime_missing",
+            "GPU高速化コンポーネントが未導入です。CPUで続行します。画面上部のGPUセットアップから、このアプリ専用に追加インストールできます。",
+        )
+    if "cuda driver" in lowered or "driver" in lowered or "cuda_error_no_device" in lowered:
+        return ("gpu_driver_missing", "NVIDIAドライバーが古い、または見つかりません。CPUで続行します。")
+    if "no cuda" in lowered or "device not found" in lowered or "cuda failed" in lowered:
+        return ("gpu_not_found", "NVIDIA GPUが見つかりません。CPUで実行します。")
+    return ("gpu_initialization_failed", f"GPU初期化に失敗しました。CPUで続行します。詳細: {detail}")
 
 
 def configure_binary_paths() -> None:
@@ -512,7 +530,8 @@ def transcribe_audio(audio_path: Path, model_name: str, transcribe_device: str =
             last_error = exc
             if device == "cuda":
                 CUDA_DISABLED = True
-                emit("warning", message=f"CUDA transcription is unavailable, falling back to CPU: {exc}")
+                code, message = classify_cuda_error(exc)
+                emit("warning", warning_code=code, message=message, detail=str(exc))
                 continue
             raise
     else:

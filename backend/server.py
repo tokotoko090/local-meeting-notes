@@ -13,6 +13,7 @@ import threading
 import urllib.error
 import urllib.request
 import webbrowser
+import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +46,12 @@ LATEST_OUTPUT_DIR: str | None = None
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 LOG_PATH = WORK_ROOT / "server.log"
 DOWNLOADED_INSTALLER: Path | None = None
+GPU_RUNTIME_ROOT = WORK_ROOT / "gpu-runtime"
+GPU_RUNTIME_PACKAGES = [
+    ("nvidia-cublas-cu12", "12.9.2.10"),
+    ("nvidia-cudnn-cu12", "9.23.2.1"),
+    ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
+]
 
 
 class UserFacingValueError(ValueError):
@@ -66,9 +73,11 @@ def backend_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    env["LOCAL_MEETING_NOTES_GPU_RUNTIME"] = str(GPU_RUNTIME_ROOT)
     cuda_paths = []
     nvidia_roots = [
         *(Path(site_path) / "nvidia" for site_path in site.getsitepackages()),
+        GPU_RUNTIME_ROOT / "nvidia",
         RESOURCE_ROOT / "nvidia",
         Path(PYTHON).resolve().parent / "nvidia",
     ]
@@ -242,6 +251,140 @@ def shutdown_app() -> dict[str, Any]:
         return {"ok": False, "error": "録音または文字起こしが終わってから終了してください。"}
     threading.Timer(0.3, lambda: os._exit(0)).start()
     return {"ok": True}
+
+
+def gpu_runtime_paths() -> list[Path]:
+    return [
+        GPU_RUNTIME_ROOT / "nvidia" / "cublas" / "bin",
+        GPU_RUNTIME_ROOT / "nvidia" / "cudnn" / "bin",
+        GPU_RUNTIME_ROOT / "nvidia" / "cuda_nvrtc" / "bin",
+    ]
+
+
+def gpu_runtime_files() -> dict[str, bool]:
+    return {
+        "cublas64_12.dll": (GPU_RUNTIME_ROOT / "nvidia" / "cublas" / "bin" / "cublas64_12.dll").exists(),
+        "cudnn64_9.dll": (GPU_RUNTIME_ROOT / "nvidia" / "cudnn" / "bin" / "cudnn64_9.dll").exists(),
+        "nvrtc64_120_0.dll": (GPU_RUNTIME_ROOT / "nvidia" / "cuda_nvrtc" / "bin" / "nvrtc64_120_0.dll").exists(),
+    }
+
+
+def nvidia_smi_status() -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+            text=True,
+            capture_output=True,
+            timeout=6,
+            check=False,
+        )
+    except FileNotFoundError:
+        return {"available": False, "reason": "driver_missing", "message": "NVIDIAドライバーが見つかりません。CPUで実行します。"}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": "probe_failed", "message": f"GPU診断に失敗しました: {exc}"}
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "reason": "driver_unavailable",
+            "message": "NVIDIA GPUまたはドライバーを確認できません。CPUで実行します。",
+            "detail": (result.stderr or result.stdout).strip(),
+        }
+    gpus = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return {"available": bool(gpus), "gpus": gpus, "message": "NVIDIA GPUを検出しました。" if gpus else "NVIDIA GPUが見つかりません。CPUで実行します。"}
+
+
+def gpu_status() -> dict[str, Any]:
+    files = gpu_runtime_files()
+    runtime_ready = all(files.values())
+    probe = nvidia_smi_status()
+    if runtime_ready and probe.get("available"):
+        state = "available"
+        label = "GPU利用可能"
+        message = "GPU高速化コンポーネントは導入済みです。"
+    elif probe.get("available"):
+        state = "setup_available"
+        label = "GPUセットアップ可能"
+        message = "NVIDIA GPUを検出しました。GPU高速化コンポーネントをこのアプリ専用に追加インストールできます。"
+    else:
+        state = "cpu"
+        label = "CPUで実行中"
+        message = str(probe.get("message") or "CPUで実行します。")
+    return {
+        "ok": True,
+        "state": state,
+        "label": label,
+        "message": message,
+        "runtime_ready": runtime_ready,
+        "runtime_root": str(GPU_RUNTIME_ROOT),
+        "runtime_files": files,
+        "probe": probe,
+    }
+
+
+def select_wheel_url(package: str, version: str) -> tuple[str, str]:
+    url = f"https://pypi.org/pypi/{package}/{version}/json"
+    data = read_url_json(url)
+    candidates = []
+    for file_info in data.get("urls", []):
+        filename = str(file_info.get("filename") or "")
+        if not filename.endswith(".whl"):
+            continue
+        if "win_amd64" in filename or "none-any" in filename or "py3-none" in filename:
+            candidates.append((filename, str(file_info.get("url") or "")))
+    if not candidates:
+        raise UserFacingValueError(f"{package} {version} のWindows用wheelが見つかりませんでした。")
+    candidates.sort(key=lambda item: ("win_amd64" not in item[0], item[0]))
+    filename, wheel_url = candidates[0]
+    if not wheel_url:
+        raise UserFacingValueError(f"{package} {version} のダウンロードURLが見つかりませんでした。")
+    return filename, wheel_url
+
+
+def download_file(url: str, target: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": f"LocalMeetingNotes/{SERVER_VERSION}"})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        with target.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+
+
+def extract_nvidia_dlls(wheel_path: Path) -> int:
+    count = 0
+    with zipfile.ZipFile(wheel_path) as archive:
+        for member in archive.infolist():
+            normalized = member.filename.replace("\\", "/")
+            if member.is_dir() or not normalized.startswith("nvidia/") or "/bin/" not in normalized or not normalized.lower().endswith(".dll"):
+                continue
+            target = GPU_RUNTIME_ROOT / Path(*normalized.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as source, target.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
+            count += 1
+    return count
+
+
+def setup_gpu_runtime() -> dict[str, Any]:
+    if any_process_running():
+        return {"ok": False, "state": "setup_failed", "label": "GPUセットアップ失敗", "error": "録音または文字起こしが終わってからGPUセットアップを実行してください。"}
+    temp_dir = WORK_ROOT / "gpu-runtime-downloads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    installed: list[dict[str, Any]] = []
+    try:
+        for package, version in GPU_RUNTIME_PACKAGES:
+            filename, url = select_wheel_url(package, version)
+            wheel_path = temp_dir / filename
+            if not wheel_path.exists():
+                download_file(url, wheel_path)
+            installed.append({"package": package, "version": version, "dll_count": extract_nvidia_dlls(wheel_path)})
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "state": "setup_failed",
+            "label": "GPUセットアップ失敗、CPUで続行",
+            "error": f"GPU高速化コンポーネントを追加インストールできませんでした: {exc}",
+        }
+    status = gpu_status()
+    status.update({"installed": installed, "message": "GPU高速化コンポーネントを追加インストールしました。"})
+    return status
 
 
 def stream_process_output(process: subprocess.Popen[str]) -> None:
@@ -459,6 +602,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/devices":
             self.send_json(run_device_list())
             return
+        if parsed.path == "/api/gpu/status":
+            self.send_json(gpu_status())
+            return
         if parsed.path == "/api/events":
             query = parse_qs(parsed.query)
             since = int(query.get("since", ["0"])[0] or "0")
@@ -523,6 +669,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/output/pick-recording-root":
             self.send_json(pick_output_dir(existing_only=False))
+            return
+        if self.path == "/api/gpu/setup":
+            self.send_json(setup_gpu_runtime())
             return
         if self.path == "/api/update/download":
             self.send_json(download_update())

@@ -12,6 +12,8 @@ export type BackendEvent = {
   model?: string;
   transcribe_device?: string;
   code?: number;
+  warning_code?: string;
+  detail?: string;
 };
 
 export type AudioDevice = {
@@ -33,6 +35,16 @@ export type UpdateCheckResult = {
   asset_name?: string;
   asset_size?: number;
   installer_path?: string;
+  error?: string;
+};
+
+export type GpuStatusResult = {
+  ok: boolean;
+  state?: "cpu" | "available" | "setup_available" | "setup_failed" | "setting_up";
+  label?: string;
+  message?: string;
+  runtime_ready?: boolean;
+  runtime_root?: string;
   error?: string;
 };
 
