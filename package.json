@@ -1,12 +1,13 @@
 {
   "name": "local-meeting-notes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.cjs",
     "start:browser": "node scripts/start-browser.cjs",
     "build": "vite build && tsc --noEmit",
+    "build:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "preview": "vite preview"
   },
   "dependencies": {

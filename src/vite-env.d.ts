@@ -24,6 +24,18 @@ export type AudioDevice = {
   kind: "mic" | "system" | "other";
 };
 
+export type UpdateCheckResult = {
+  ok: boolean;
+  current_version?: string;
+  latest_version?: string;
+  update_available?: boolean;
+  release_url?: string;
+  asset_name?: string;
+  asset_size?: number;
+  installer_path?: string;
+  error?: string;
+};
+
 declare global {
   interface Window {
     meetingNotes: {

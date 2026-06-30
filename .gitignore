@@ -1,6 +1,11 @@
 node_modules/
+build/
 dist/
+dist-app/
+dist-app-lite/
 output/
+release/
+vendor/
 .venv/
 __pycache__/
 *.pyc

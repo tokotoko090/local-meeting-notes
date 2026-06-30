@@ -1,6 +1,6 @@
-import { Clipboard, Cpu, FolderOpen, Mic, Play, RefreshCcw, Square, Volume2 } from "lucide-react";
+import { Clipboard, Cpu, Download, FolderOpen, Mic, Play, RefreshCcw, Square, Upload, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AudioDevice, BackendEvent } from "./vite-env";
+import type { AudioDevice, BackendEvent, UpdateCheckResult } from "./vite-env";
 
 type RecordingState = "idle" | "recording" | "processing" | "complete" | "error";
 
@@ -31,6 +31,10 @@ export default function App() {
   const [systemDevice, setSystemDevice] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [events, setEvents] = useState<BackendEvent[]>([]);
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
+  const [updateStatus, setUpdateStatus] = useState("");
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [downloadedInstaller, setDownloadedInstaller] = useState("");
   const startedAt = useRef<number | null>(null);
   const lastEventId = useRef(0);
 
@@ -208,6 +212,59 @@ export default function App() {
     }
   }
 
+  async function checkForUpdates() {
+    setUpdateBusy(true);
+    setUpdateStatus("Checking for updates...");
+    setError("");
+    setDownloadedInstaller("");
+    try {
+      const result: UpdateCheckResult = await apiCall("/api/update/check");
+      setUpdateInfo(result);
+      if (!result.ok) {
+        setUpdateStatus(result.error || "Could not check for updates.");
+      } else if (result.update_available) {
+        setUpdateStatus(`Version ${result.latest_version} is available.`);
+      } else {
+        setUpdateStatus(`You are up to date. Current version: ${result.current_version || "unknown"}.`);
+      }
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function downloadUpdate() {
+    setUpdateBusy(true);
+    setUpdateStatus("Downloading installer...");
+    setError("");
+    try {
+      const result: UpdateCheckResult = await apiCall("/api/update/download", {});
+      if (!result.ok) {
+        setUpdateStatus(result.error || "Could not download the update.");
+        return;
+      }
+      setDownloadedInstaller(result.installer_path || "");
+      setUpdateStatus(`Downloaded version ${result.latest_version || ""}.`);
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function installUpdate() {
+    setUpdateBusy(true);
+    setUpdateStatus("Starting installer...");
+    setError("");
+    try {
+      const result: UpdateCheckResult = await apiCall("/api/update/install", {});
+      if (!result.ok) {
+        setUpdateStatus(result.error || "Could not start the installer.");
+        return;
+      }
+      setUpdateStatus("Installer started. The app will close.");
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
   useEffect(() => {
     void refreshDevices();
   }, []);
@@ -234,6 +291,44 @@ export default function App() {
 
       <section className="notice">
         Get consent before recording. Files are saved only on this PC under the output folder.
+      </section>
+
+      <section className="updateBar">
+        <div>
+          <h2>Updates</h2>
+          <p>{updateStatus || "Check GitHub Releases for a newer installer."}</p>
+          {updateInfo?.release_url && (
+            <a href={updateInfo.release_url} target="_blank" rel="noreferrer">
+              View release
+            </a>
+          )}
+        </div>
+        <div className="updateActions">
+          <button className="secondary" type="button" onClick={checkForUpdates} disabled={updateBusy || state === "recording" || state === "processing"} title="Check for updates">
+            <RefreshCcw size={18} />
+            Check
+          </button>
+          <button
+            className="secondary"
+            type="button"
+            onClick={downloadUpdate}
+            disabled={updateBusy || !updateInfo?.update_available || state === "recording" || state === "processing"}
+            title="Download update installer"
+          >
+            <Download size={18} />
+            Download
+          </button>
+          <button
+            className="primary"
+            type="button"
+            onClick={installUpdate}
+            disabled={updateBusy || !downloadedInstaller || state === "recording" || state === "processing"}
+            title="Run downloaded installer"
+          >
+            <Upload size={18} />
+            Install
+          </button>
+        </div>
       </section>
 
       <section className="controls">

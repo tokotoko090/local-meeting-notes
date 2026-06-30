@@ -17,7 +17,9 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.2.0"
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 SAMPLE_RATE = 48_000
 CHANNELS = 2
 FRAMES_PER_BUFFER = 2048
@@ -56,6 +58,24 @@ def configure_cuda_dll_paths() -> list[str]:
             except OSError:
                 pass
     return paths
+
+
+def configure_binary_paths() -> None:
+    candidates = [
+        RESOURCE_ROOT / "vendor",
+        RESOURCE_ROOT / "ffmpeg",
+        Path(sys.executable).resolve().parent / "vendor",
+    ]
+    existing = {part.lower() for part in os.environ.get("PATH", "").split(os.pathsep) if part}
+    additions = [str(path) for path in candidates if path.exists() and str(path).lower() not in existing]
+    if additions:
+        os.environ["PATH"] = os.pathsep.join([*additions, os.environ.get("PATH", "")])
+
+
+def backend_command_args(*args: str) -> list[str]:
+    if IS_FROZEN:
+        return [sys.executable, "--backend", *args]
+    return [sys.executable, str(Path(__file__).resolve()), *args]
 
 
 @dataclass(frozen=True)
@@ -315,6 +335,7 @@ def has_audio_frames(path: Path) -> bool:
 
 
 def run_record(args: argparse.Namespace) -> int:
+    configure_binary_paths()
     if shutil.which("ffmpeg") is None:
         raise UserFacingError("ffmpeg was not found in PATH. Install ffmpeg before recording.")
 
@@ -351,8 +372,7 @@ def run_record(args: argparse.Namespace) -> int:
     children: list[tuple[str, subprocess.Popen[str]]] = []
     for file_name, device_index in child_specs:
         child_args = [
-            sys.executable,
-            str(Path(__file__).resolve()),
+            *backend_command_args(
             "record-one",
             "--output-dir",
             str(output_dir),
@@ -360,6 +380,7 @@ def run_record(args: argparse.Namespace) -> int:
             file_name,
             "--device-index",
             str(device_index),
+            )
         ]
         child = subprocess.Popen(
             child_args,
@@ -493,6 +514,7 @@ def whisper_runtime_attempts(transcribe_device: str) -> list[tuple[str, str]]:
 
 
 def prepare_audio_for_whisper(audio_path: Path) -> Path:
+    configure_binary_paths()
     prepared_path = audio_path.with_name(f"{audio_path.stem}_whisper.wav")
     if prepared_path.exists() and prepared_path.stat().st_mtime >= audio_path.stat().st_mtime:
         return prepared_path

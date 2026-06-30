@@ -127,6 +127,42 @@ h2 {
   background: #fff8d6;
 }
 
+.updateBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 18px;
+  border: 1px solid #d8d8ce;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px 18px;
+}
+
+.updateBar h2 {
+  margin-bottom: 6px;
+}
+
+.updateBar p {
+  color: #64645b;
+  line-height: 1.5;
+}
+
+.updateBar a {
+  display: inline-block;
+  margin-top: 6px;
+  color: #1b6f5f;
+  font-weight: 640;
+}
+
+.updateActions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .error {
   border: 1px solid #d99b9b;
   background: #fff0ef;

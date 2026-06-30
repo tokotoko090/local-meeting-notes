@@ -1,80 +1,58 @@
 # Local Meeting Notes
 
-Windows-only MVP for recording local meeting audio into separate microphone and PC-output WAV files, transcribing both locally, and generating Markdown that can be pasted into ChatGPT Plus.
+Windows専用のローカル議事録作成ツールです。
 
-## Assumed Environment
+マイク音声とPCから出ている音声を別々に録音し、PC上で文字起こしして、ChatGPTに貼り付けやすいMarkdownプロンプトを作成します。OpenAI APIは使いません。録音ファイルや文字起こし結果は、手動で共有しない限りこのPC内に残ります。
 
-- Windows 10 / 11
-- Node.js 20+
-- Python 3.11+
-- ffmpeg available in `PATH`
-- A working microphone
-- A Windows playback device that exposes a WASAPI loopback device
-- Optional NVIDIA GPU with a current driver for CUDA transcription
+## インストール方法
 
-This app does not use the OpenAI API and does not send audio, transcripts, or generated notes to an external server.
+1. GitHub Releasesから最新版の `LocalMeetingNotesSetup-x.y.z.exe` をダウンロードします。
+2. ダウンロードしたインストーラーを実行します。
+3. インストールが終わると、デスクトップとスタートメニューに `Local Meeting Notes` のショートカットが作成されます。
+4. ショートカットから起動します。
 
-## Setup
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-npm.cmd install
-```
-
-## Verify Audio Devices
-
-List available microphone and loopback devices:
-
-```powershell
-.\.venv\Scripts\python.exe backend\meeting_notes.py list-devices
-```
-
-Record a 10 second Phase 1 smoke test:
-
-```powershell
-.\.venv\Scripts\python.exe backend\meeting_notes.py record --duration 10 --skip-transcribe
-```
-
-The command creates a timestamped folder under `output/` containing:
-
-- `mic.wav`
-- `system.wav`
-- `metadata.json`
-- `app.log`
-
-If `system.wav` is silent or missing, confirm that audio is playing through the selected Windows output device and that a WASAPI loopback device is listed.
-
-## Run The App
-
-```powershell
-npm.cmd run start:browser
-```
-
-Open:
+インストール先は現在のWindowsユーザー配下です。管理者権限は不要です。
 
 ```text
-http://127.0.0.1:5173
+%LOCALAPPDATA%\LocalMeetingNotes
 ```
 
-The browser UI uses the local Python backend for microphone and WASAPI loopback recording. It does not use browser screen sharing or `getDisplayMedia`.
+## 起動方法
 
-The UI shows consent guidance, recording state, elapsed time, saved file status, transcription progress, output path, and buttons for copying the ChatGPT prompt or opening the output folder.
+デスクトップまたはスタートメニューの `Local Meeting Notes` を開きます。
 
-Use the `Microphone` and `PC Output` selectors to choose explicit devices. `PC Output` lists Windows WASAPI loopback devices such as speakers, headsets, HDMI/DisplayPort audio, or virtual audio outputs. If a selected PC output device records silence or fails, choose the loopback device that matches the Windows output device currently playing meeting audio.
+起動するとローカルサーバーが立ち上がり、通常は既定のブラウザで次の画面が開きます。
 
-Use `Transcribe device` to choose `cpu`, `auto`, or `cuda`. CUDA uses `faster-whisper` through CTranslate2 and the NVIDIA runtime DLL packages from `backend/requirements.txt`.
+```text
+http://127.0.0.1:8765
+```
 
-To rerun transcription for an existing recording, click `Browse`, select an existing `output\...` folder, then click `Transcribe Existing Output`. Existing transcript JSON and Markdown files in that folder are overwritten.
+ブラウザが自動で開かない場合は、上のURLを手動で開いてください。
 
-## Output Layout
+## 基本的な使い方
 
-Each recording is saved under a timestamped directory:
+1. 会議参加者に録音の同意を取ります。
+2. `Whisper model` を選びます。迷ったら `base` のままで構いません。
+3. `Transcribe device` は、まず `cpu` のまま使ってください。
+4. `Microphone` で自分のマイクを選びます。
+5. `PC Output` で会議音声が流れているスピーカーやヘッドホンの `[Loopback]` デバイスを選びます。
+6. `Start Recording` を押して録音を開始します。
+7. 会議が終わったら `Stop Recording` を押します。
+8. 処理完了後、`Copy Prompt` でChatGPT用プロンプトをコピーするか、`Open Output` で保存フォルダを開きます。
+
+## 保存される場所
+
+録音結果は次のフォルダに保存されます。
+
+```text
+%LOCALAPPDATA%\LocalMeetingNotes\output
+```
+
+1回の録音ごとに、日時付きのフォルダが作成されます。
 
 ```text
 output/
-  2026-06-23_14-30-00/
+  2026-07-01_14-30-00/
     mic.wav
     system.wav
     mic_transcript.json
@@ -85,34 +63,122 @@ output/
     app.log
 ```
 
-`metadata.json` includes:
+主に使うファイルは次の2つです。
 
-- `recording_started_at`
-- `recording_stopped_at`
-- `duration_seconds`
-- `mic_device_name`
-- `system_device_name`
-- `whisper_model`
-- `app_version`
+- `transcript.md`: マイク音声とPC音声をまとめた文字起こし
+- `chatgpt_prompt.md`: ChatGPTに貼り付けるためのプロンプト
 
-## Whisper Model
+## 既存録音をもう一度文字起こしする
 
-The default model is `small`. You can choose another model from the UI or CLI:
+録音済みフォルダに対して、文字起こしやプロンプト生成だけをやり直せます。
 
-```powershell
-.\.venv\Scripts\python.exe backend\meeting_notes.py record --model medium
+1. `Browse` を押します。
+2. `output` 配下の既存録音フォルダを選びます。
+3. `Transcribe Existing Output` を押します。
+
+この操作では、選択したフォルダ内の `mic_transcript.json`、`system_transcript.json`、`transcript.md`、`chatgpt_prompt.md` が上書きされます。
+
+## アップデート方法
+
+画面上部の `Updates` から更新できます。
+
+1. `Check` を押して、GitHub Releasesに新しいバージョンがあるか確認します。
+2. 新しいバージョンがある場合は `Download` を押します。
+3. ダウンロード後、`Install` を押します。
+4. インストーラーが起動するので、そのまま更新します。
+
+録音中や文字起こし中は更新できません。処理が終わってから実行してください。
+
+## よくあるトラブル
+
+### PC側の音声が録音されない
+
+`PC Output` で、実際に会議音声が流れている出力デバイスの `[Loopback]` を選んでください。
+
+例えばヘッドホンで会議音声を聞いている場合は、スピーカーではなくヘッドホン側のloopbackを選びます。
+
+### `No WASAPI loopback device found` と表示される
+
+Windowsで再生デバイスが有効になっているか確認してください。会議音声やYouTubeなど、何か音を流した状態で `Devices` を押すと見つかりやすくなります。
+
+### `No microphone input device found` と表示される
+
+Windowsのサウンド設定でマイクが有効か確認してください。USBマイクやヘッドセットを接続し直してから `Devices` を押してください。
+
+### 文字起こしが遅い
+
+`Transcribe device` が `cpu` の場合、長い会議では時間がかかります。NVIDIA GPUとCUDA環境が正しく入っているPCでは `auto` または `cuda` を試せます。
+
+ただし、CUDAエラーが出る場合は `cpu` に戻してください。CPUモードが最も互換性の高い設定です。
+
+### アップデート確認が失敗する
+
+インターネット接続と、GitHub Releasesが公開されているかを確認してください。公開Releaseがない場合、アプリは更新を見つけられません。
+
+## アンインストール
+
+Windowsの「インストールされているアプリ」から `Local Meeting Notes` をアンインストールできます。
+
+または次のアンインストーラーを実行します。
+
+```text
+%LOCALAPPDATA%\LocalMeetingNotes\Uninstall.exe
 ```
 
-The first transcription run may download the selected faster-whisper model. After that, transcription runs locally.
+録音データはユーザーの出力フォルダに残る場合があります。不要であれば次のフォルダを手動で削除してください。
 
-## Common Errors
+```text
+%LOCALAPPDATA%\LocalMeetingNotes\output
+```
 
-- `pyaudiowpatch is not installed`: install backend requirements in the active Python environment.
-- `No WASAPI loopback device found`: make sure a Windows playback device is active, then run `list-devices`.
-- `No microphone input device found`: connect or enable a microphone in Windows sound settings.
-- `ffmpeg not found`: install ffmpeg and confirm `ffmpeg -version` works in PowerShell.
-- Bluetooth or external audio interfaces may expose device names differently. Use `list-devices` and pass explicit `--mic-device-index` or `--system-device-index` if automatic selection picks the wrong device.
+## 開発者向け
 
-## Privacy And Consent
+開発に必要なもの:
 
-Only record meetings when participants have agreed to recording. Audio and transcript files stay on the local machine unless you manually share them.
+- Windows 10 / 11
+- Node.js 20以上
+- Python 3.11以上
+- ffmpeg
+- NSIS
+
+開発環境のセットアップ:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+npm.cmd install
+```
+
+開発用に起動:
+
+```powershell
+npm.cmd run start:browser
+```
+
+Windowsインストーラーを作成:
+
+```powershell
+npm.cmd run build:windows
+```
+
+作成されたインストーラー:
+
+```text
+release\LocalMeetingNotesSetup-x.y.z.exe
+```
+
+## リリース手順
+
+1. `package.json`、`backend/server.py`、`backend/meeting_notes.py` のバージョンを揃えます。
+2. 変更をGitHubにpushします。
+3. `v0.2.0` のようなタグをpushします。
+4. GitHub ActionsがWindowsインストーラーを作成し、GitHub Releaseに添付します。
+
+アプリ内アップデートは、公開GitHub Releaseに添付された `LocalMeetingNotesSetup-x.y.z.exe` を探します。
+
+## プライバシーと同意
+
+録音は、必ず参加者の同意を得てから行ってください。
+
+音声、文字起こし、生成されたプロンプトはローカルPCに保存されます。外部サービスに自動送信されることはありません。

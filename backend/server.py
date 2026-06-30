@@ -1,20 +1,39 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import queue
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import urllib.error
+import urllib.request
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import site
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-ROOT = Path(__file__).resolve().parents[1]
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+ROOT = Path(sys.executable).resolve().parent if IS_FROZEN else Path(__file__).resolve().parents[1]
+WORK_ROOT = (
+    Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"
+    if IS_FROZEN
+    else ROOT
+)
 PYTHON = sys.executable
-SERVER_VERSION = "0.1.5"
+SERVER_VERSION = "0.2.0"
+APP_NAME = "Local Meeting Notes"
+GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
+RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+INSTALLER_ASSET_RE = re.compile(r"LocalMeetingNotesSetup-[0-9A-Za-z_.-]+\.exe$", re.IGNORECASE)
+STATIC_ROOT = Path(os.environ.get("LOCAL_MEETING_NOTES_STATIC_ROOT", str(RESOURCE_ROOT / "dist")))
 EVENTS: "queue.Queue[dict[str, Any]]" = queue.Queue()
 EVENT_HISTORY: list[dict[str, Any]] = []
 EVENT_LOCK = threading.Lock()
@@ -22,7 +41,9 @@ NEXT_EVENT_ID = 0
 RECORDER: subprocess.Popen[str] | None = None
 TRANSCRIBER: subprocess.Popen[str] | None = None
 LATEST_OUTPUT_DIR: str | None = None
-LOG_PATH = ROOT / "server.log"
+WORK_ROOT.mkdir(parents=True, exist_ok=True)
+LOG_PATH = WORK_ROOT / "server.log"
+DOWNLOADED_INSTALLER: Path | None = None
 
 
 class UserFacingValueError(ValueError):
@@ -35,6 +56,8 @@ def log(message: str) -> None:
 
 
 def backend_args(*args: str) -> list[str]:
+    if IS_FROZEN:
+        return [PYTHON, "--backend", *args]
     return [PYTHON, str(ROOT / "backend" / "meeting_notes.py"), *args]
 
 
@@ -76,7 +99,7 @@ def read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
 def run_device_list() -> dict[str, Any]:
     result = subprocess.run(
         backend_args("list-devices", "--json"),
-        cwd=ROOT,
+        cwd=WORK_ROOT,
         text=True,
         capture_output=True,
         check=False,
@@ -93,6 +116,120 @@ def run_device_list() -> dict[str, Any]:
         "devices": payload.get("devices", []),
         "error": result.stderr.strip(),
     }
+
+
+def version_parts(version: str) -> tuple[int, ...]:
+    cleaned = version.strip().lstrip("vV")
+    parts: list[int] = []
+    for part in cleaned.split("."):
+        match = re.match(r"(\d+)", part)
+        parts.append(int(match.group(1)) if match else 0)
+    return tuple(parts)
+
+
+def is_newer_version(candidate: str, current: str) -> bool:
+    left = version_parts(candidate)
+    right = version_parts(current)
+    length = max(len(left), len(right), 3)
+    return left + (0,) * (length - len(left)) > right + (0,) * (length - len(right))
+
+
+def read_url_json(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"LocalMeetingNotes/{SERVER_VERSION}",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def latest_release_info() -> dict[str, Any]:
+    release = read_url_json(RELEASE_API_URL)
+    tag_name = str(release.get("tag_name") or "")
+    version = tag_name.lstrip("vV")
+    selected_asset: dict[str, Any] | None = None
+    for asset in release.get("assets", []):
+        name = str(asset.get("name") or "")
+        if INSTALLER_ASSET_RE.match(name):
+            selected_asset = asset
+            break
+    return {
+        "tag_name": tag_name,
+        "version": version,
+        "release_url": release.get("html_url"),
+        "asset": selected_asset,
+    }
+
+
+def check_update() -> dict[str, Any]:
+    try:
+        info = latest_release_info()
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "error": f"Could not check GitHub Releases: HTTP {exc.code}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not check GitHub Releases: {exc}"}
+
+    asset = info.get("asset")
+    latest_version = str(info.get("version") or "")
+    available = bool(latest_version and is_newer_version(latest_version, SERVER_VERSION) and asset)
+    return {
+        "ok": True,
+        "current_version": SERVER_VERSION,
+        "latest_version": latest_version,
+        "update_available": available,
+        "release_url": info.get("release_url"),
+        "asset_name": asset.get("name") if asset else None,
+        "asset_size": asset.get("size") if asset else None,
+    }
+
+
+def download_update() -> dict[str, Any]:
+    global DOWNLOADED_INSTALLER
+    if any_process_running():
+        return {"ok": False, "error": "Finish the current recording or transcription before updating."}
+    try:
+        info = latest_release_info()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not check GitHub Releases: {exc}"}
+
+    asset = info.get("asset")
+    latest_version = str(info.get("version") or "")
+    if not asset or not latest_version or not is_newer_version(latest_version, SERVER_VERSION):
+        return {"ok": False, "error": "No newer installer is available."}
+
+    url = str(asset.get("browser_download_url") or "")
+    name = str(asset.get("name") or f"LocalMeetingNotesSetup-{latest_version}.exe")
+    if not url:
+        return {"ok": False, "error": "The latest release does not include a downloadable installer."}
+
+    target_dir = Path(tempfile.gettempdir()) / "LocalMeetingNotesUpdates"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / name
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": f"LocalMeetingNotes/{SERVER_VERSION}"}), timeout=60) as response:
+            with target.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not download installer: {exc}"}
+
+    DOWNLOADED_INSTALLER = target
+    return {"ok": True, "installer_path": str(target), "latest_version": latest_version}
+
+
+def install_update() -> dict[str, Any]:
+    if any_process_running():
+        return {"ok": False, "error": "Finish the current recording or transcription before updating."}
+    if not DOWNLOADED_INSTALLER or not DOWNLOADED_INSTALLER.exists():
+        return {"ok": False, "error": "Download the update before installing it."}
+    try:
+        subprocess.Popen([str(DOWNLOADED_INSTALLER)], cwd=str(DOWNLOADED_INSTALLER.parent))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not start installer: {exc}"}
+    threading.Timer(1.0, lambda: os._exit(0)).start()
+    return {"ok": True}
 
 
 def stream_process_output(process: subprocess.Popen[str]) -> None:
@@ -115,7 +252,7 @@ def stream_process_error(process: subprocess.Popen[str]) -> None:
 def start_backend_process(args: list[str]) -> subprocess.Popen[str]:
     process = subprocess.Popen(
         backend_args(*args),
-        cwd=ROOT,
+        cwd=WORK_ROOT,
         text=True,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -167,7 +304,7 @@ def resolve_output_dir(output_dir: str) -> Path:
         raise UserFacingValueError("Output folder is required.")
     path = Path(output_dir)
     if not path.is_absolute():
-        path = ROOT / path
+        path = WORK_ROOT / path
     path = path.resolve()
     if not path.exists() or not path.is_dir():
         raise UserFacingValueError(f"Output folder does not exist: {path}")
@@ -213,8 +350,8 @@ def open_output(output_dir: str | None = None) -> dict[str, Any]:
 
 def pick_output_dir() -> dict[str, Any]:
     env = os.environ.copy()
-    output_root = ROOT / "output"
-    env["LOCAL_MEETING_NOTES_OUTPUT_ROOT"] = str(output_root.resolve() if output_root.exists() else ROOT.resolve())
+    output_root = WORK_ROOT / "output"
+    env["LOCAL_MEETING_NOTES_OUTPUT_ROOT"] = str(output_root.resolve() if output_root.exists() else WORK_ROOT.resolve())
     script = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -234,7 +371,7 @@ exit 3
 """
     result = subprocess.run(
         ["powershell", "-NoProfile", "-STA", "-Command", script],
-        cwd=ROOT,
+        cwd=WORK_ROOT,
         text=True,
         capture_output=True,
         encoding="utf-8",
@@ -268,10 +405,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_file(self, path: Path) -> None:
+        content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             self.send_json({"ok": True, "server_version": SERVER_VERSION})
+            return
+        if parsed.path == "/api/update/check":
+            self.send_json(check_update())
             return
         if parsed.path == "/api/devices":
             self.send_json(run_device_list())
@@ -283,6 +432,22 @@ class Handler(BaseHTTPRequestHandler):
                 events = [event for event in EVENT_HISTORY if int(event.get("id", 0)) > since]
             self.send_json({"ok": True, "events": events})
             return
+        if STATIC_ROOT.exists():
+            relative = parsed.path.lstrip("/") or "index.html"
+            static_path = (STATIC_ROOT / relative).resolve()
+            try:
+                static_path.relative_to(STATIC_ROOT.resolve())
+            except ValueError:
+                self.send_response(403)
+                self.end_headers()
+                return
+            if static_path.exists() and static_path.is_file():
+                self.send_file(static_path)
+                return
+            index_path = STATIC_ROOT / "index.html"
+            if index_path.exists():
+                self.send_file(index_path)
+                return
         self.send_response(404)
         self.end_headers()
 
@@ -321,6 +486,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/output/pick-directory":
             self.send_json(pick_output_dir())
             return
+        if self.path == "/api/update/download":
+            self.send_json(download_update())
+            return
+        if self.path == "/api/update/install":
+            self.send_json(install_update())
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -331,8 +502,12 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     try:
         server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-        log("Local Meeting Notes API: http://127.0.0.1:8765")
-        print("Local Meeting Notes API: http://127.0.0.1:8765", flush=True)
+        url = "http://127.0.0.1:8765"
+        log(f"{APP_NAME}: {url}")
+        print(f"{APP_NAME}: {url}", flush=True)
+        open_browser_default = "1" if IS_FROZEN else "0"
+        if os.environ.get("LOCAL_MEETING_NOTES_OPEN_BROWSER", open_browser_default) == "1":
+            threading.Timer(0.5, lambda: webbrowser.open(url)).start()
         server.serve_forever()
     except Exception as exc:  # noqa: BLE001
         log(f"server failed: {exc}")
