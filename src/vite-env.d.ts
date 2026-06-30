@@ -46,6 +46,7 @@ declare global {
       pickOutputFolder?: () => Promise<{ ok: boolean; output_dir?: string; canceled?: boolean; error?: string }>;
       openOutputFolder: (outputDir?: string) => Promise<{ ok: boolean; error?: string }>;
       copyPrompt: (outputDir?: string) => Promise<{ ok: boolean; error?: string }>;
+      shutdown?: () => Promise<{ ok: boolean; error?: string }>;
       onBackendEvent: (callback: (payload: BackendEvent) => void) => () => void;
     };
   }

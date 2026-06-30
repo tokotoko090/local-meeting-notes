@@ -28,7 +28,7 @@ WORK_ROOT = (
     else ROOT
 )
 PYTHON = sys.executable
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 APP_NAME = "Local Meeting Notes"
 GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -229,6 +229,13 @@ def install_update() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"Could not start installer: {exc}"}
     threading.Timer(1.0, lambda: os._exit(0)).start()
+    return {"ok": True}
+
+
+def shutdown_app() -> dict[str, Any]:
+    if any_process_running():
+        return {"ok": False, "error": "録音または文字起こしが終わってから終了してください。"}
+    threading.Timer(0.3, lambda: os._exit(0)).start()
     return {"ok": True}
 
 
@@ -491,6 +498,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/update/install":
             self.send_json(install_update())
+            return
+        if self.path == "/api/shutdown":
+            self.send_json(shutdown_app())
             return
         self.send_response(404)
         self.end_headers()

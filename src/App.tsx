@@ -1,4 +1,4 @@
-import { Clipboard, Cpu, Download, FolderOpen, Mic, Play, RefreshCcw, Square, Upload, Volume2 } from "lucide-react";
+import { Cpu, Download, FolderOpen, Mic, Play, Power, RefreshCcw, Square, Upload, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AudioDevice, BackendEvent, UpdateCheckResult } from "./vite-env";
 
@@ -15,6 +15,33 @@ function formatElapsed(seconds: number): string {
 
 function eventMessage(event: BackendEvent): string {
   return event.message || event.file || event.output_dir || event.model || event.transcribe_device || "";
+}
+
+function eventLabel(eventName: string): string {
+  const labels: Record<string, string> = {
+    complete: "完了",
+    error: "エラー",
+    log: "ログ",
+    process_closed: "処理終了",
+    prompt_generated: "プロンプト作成",
+    record_one_complete: "録音保存",
+    recording_started: "録音開始",
+    recording_stopped: "録音停止",
+    status: "状態",
+    transcript_generated: "文字起こし作成",
+    transcription_complete: "文字起こし完了",
+    transcription_queued: "文字起こし待機",
+    transcription_started: "文字起こし開始",
+    transcribing: "文字起こし中",
+    warning: "警告"
+  };
+  return labels[eventName] || eventName;
+}
+
+function deviceKindLabel(kind: AudioDevice["kind"]): string {
+  if (kind === "mic") return "マイク";
+  if (kind === "system") return "PC出力";
+  return "その他";
 }
 
 export default function App() {
@@ -69,12 +96,12 @@ export default function App() {
     if (payload.event === "process_closed" && payload.code !== 0) {
       startedAt.current = null;
       setState("error");
-      setError("The recording process stopped with an error.");
+      setError("録音または処理がエラーで停止しました。");
     }
     if (payload.event === "error") {
       startedAt.current = null;
       setState("error");
-      setError(payload.message || "Processing failed.");
+      setError(payload.message || "処理に失敗しました。");
     }
   }
 
@@ -100,7 +127,7 @@ export default function App() {
             handleBackendEvent(payload);
           }
         } catch {
-          setError("Local API is not running. Close this window and start Local Meeting Notes again.");
+          setError("ローカルAPIが起動していません。画面を閉じて Local Meeting Notes を起動し直してください。");
         }
       }, 700);
       return () => window.clearInterval(timer);
@@ -123,11 +150,11 @@ export default function App() {
   }, [state]);
 
   const statusLabel = useMemo(() => {
-    if (state === "recording") return "Recording";
-    if (state === "processing") return "Processing";
-    if (state === "complete") return "Complete";
-    if (state === "error") return "Error";
-    return "Ready";
+    if (state === "recording") return "録音中";
+    if (state === "processing") return "処理中";
+    if (state === "complete") return "完了";
+    if (state === "error") return "エラー";
+    return "待機中";
   }, [state]);
 
   async function refreshDevices() {
@@ -148,7 +175,7 @@ export default function App() {
       }
       setError("");
     } else {
-      setError(result.error || "Could not load audio devices.");
+      setError(result.error || "音声デバイスを読み込めませんでした。");
     }
   }
 
@@ -156,7 +183,7 @@ export default function App() {
     const options = { model, transcribeDevice, micDeviceIndex: selectedMicDeviceIndex, systemDeviceIndex: selectedSystemDeviceIndex };
     const result = window.meetingNotes ? await window.meetingNotes.startRecording(options) : await apiCall("/api/recording/start", options);
     if (!result.ok) {
-      setError(result.error || "Could not start recording.");
+      setError(result.error || "録音を開始できませんでした。");
     }
   }
 
@@ -164,22 +191,15 @@ export default function App() {
     setState("processing");
     const result = window.meetingNotes ? await window.meetingNotes.stopRecording() : await apiCall("/api/recording/stop", {});
     if (!result.ok) {
-      setError(result.error || "Could not stop recording.");
+      setError(result.error || "録音を停止できませんでした。");
       setState("error");
-    }
-  }
-
-  async function copyPrompt() {
-    const result = window.meetingNotes ? await window.meetingNotes.copyPrompt(outputDir) : await apiCall("/api/prompt/copy", { outputDir });
-    if (!result.ok) {
-      setError(result.error || "Could not copy the prompt.");
     }
   }
 
   async function openFolder() {
     const result = window.meetingNotes ? await window.meetingNotes.openOutputFolder(outputDir) : await apiCall("/api/output/open", { outputDir });
     if (!result.ok) {
-      setError(result.error || "Could not open the output folder.");
+      setError(result.error || "保存フォルダを開けませんでした。");
     }
   }
 
@@ -190,7 +210,7 @@ export default function App() {
     const options = { outputDir: target, model, transcribeDevice };
     const result = window.meetingNotes?.transcribeExisting ? await window.meetingNotes.transcribeExisting(options) : await apiCall("/api/transcribe-existing", options);
     if (!result.ok) {
-      setError(result.error || "Could not start transcription.");
+      setError(result.error || "文字起こしを開始できませんでした。");
       setState("error");
       return;
     }
@@ -208,24 +228,24 @@ export default function App() {
       return;
     }
     if (!result.canceled) {
-      setError(result.error || "Could not open the folder picker.");
+      setError(result.error || "フォルダ選択を開けませんでした。");
     }
   }
 
   async function checkForUpdates() {
     setUpdateBusy(true);
-    setUpdateStatus("Checking for updates...");
+    setUpdateStatus("更新を確認しています...");
     setError("");
     setDownloadedInstaller("");
     try {
       const result: UpdateCheckResult = await apiCall("/api/update/check");
       setUpdateInfo(result);
       if (!result.ok) {
-        setUpdateStatus(result.error || "Could not check for updates.");
+        setUpdateStatus(result.error || "更新を確認できませんでした。");
       } else if (result.update_available) {
-        setUpdateStatus(`Version ${result.latest_version} is available.`);
+        setUpdateStatus(`バージョン ${result.latest_version} が利用できます。`);
       } else {
-        setUpdateStatus(`You are up to date. Current version: ${result.current_version || "unknown"}.`);
+        setUpdateStatus(`最新版です。現在のバージョン: ${result.current_version || "不明"}`);
       }
     } finally {
       setUpdateBusy(false);
@@ -234,16 +254,16 @@ export default function App() {
 
   async function downloadUpdate() {
     setUpdateBusy(true);
-    setUpdateStatus("Downloading installer...");
+    setUpdateStatus("インストーラーをダウンロードしています...");
     setError("");
     try {
       const result: UpdateCheckResult = await apiCall("/api/update/download", {});
       if (!result.ok) {
-        setUpdateStatus(result.error || "Could not download the update.");
+        setUpdateStatus(result.error || "更新をダウンロードできませんでした。");
         return;
       }
       setDownloadedInstaller(result.installer_path || "");
-      setUpdateStatus(`Downloaded version ${result.latest_version || ""}.`);
+      setUpdateStatus(`バージョン ${result.latest_version || ""} をダウンロードしました。`);
     } finally {
       setUpdateBusy(false);
     }
@@ -251,18 +271,29 @@ export default function App() {
 
   async function installUpdate() {
     setUpdateBusy(true);
-    setUpdateStatus("Starting installer...");
+    setUpdateStatus("インストーラーを起動しています...");
     setError("");
     try {
       const result: UpdateCheckResult = await apiCall("/api/update/install", {});
       if (!result.ok) {
-        setUpdateStatus(result.error || "Could not start the installer.");
+        setUpdateStatus(result.error || "インストーラーを起動できませんでした。");
         return;
       }
-      setUpdateStatus("Installer started. The app will close.");
+      setUpdateStatus("インストーラーを起動しました。アプリは終了します。");
     } finally {
       setUpdateBusy(false);
     }
+  }
+
+  async function shutdownApp() {
+    setError("");
+    const result = await apiCall("/api/shutdown", {});
+    if (!result.ok) {
+      setError(result.error || "アプリを終了できませんでした。");
+      return;
+    }
+    setState("complete");
+    setError("アプリを終了しています。このタブを閉じてください。");
   }
 
   useEffect(() => {
@@ -281,7 +312,7 @@ export default function App() {
       <section className="topbar">
         <div>
           <h1>Local Meeting Notes</h1>
-          <p>Record microphone and PC output separately, transcribe locally, and generate a ChatGPT-ready prompt.</p>
+          <p>マイク音声とPC出力音声を別々に録音し、ローカルで文字起こしします。</p>
         </div>
         <div className={`status ${state}`}>
           <span>{statusLabel}</span>
@@ -290,50 +321,54 @@ export default function App() {
       </section>
 
       <section className="notice">
-        Get consent before recording. Files are saved only on this PC under the output folder.
+        録音前に参加者の同意を取ってください。ファイルはこのPC内の保存フォルダにだけ保存されます。
       </section>
 
       <section className="updateBar">
         <div>
-          <h2>Updates</h2>
-          <p>{updateStatus || "Check GitHub Releases for a newer installer."}</p>
+          <h2>アップデート</h2>
+          <p>{updateStatus || "GitHub Releasesに新しいインストーラーがあるか確認します。"}</p>
           {updateInfo?.release_url && (
             <a href={updateInfo.release_url} target="_blank" rel="noreferrer">
-              View release
+              Releaseを開く
             </a>
           )}
         </div>
         <div className="updateActions">
-          <button className="secondary" type="button" onClick={checkForUpdates} disabled={updateBusy || state === "recording" || state === "processing"} title="Check for updates">
+          <button className="secondary" type="button" onClick={checkForUpdates} disabled={updateBusy || state === "recording" || state === "processing"} title="更新を確認">
             <RefreshCcw size={18} />
-            Check
+            確認
           </button>
           <button
             className="secondary"
             type="button"
             onClick={downloadUpdate}
             disabled={updateBusy || !updateInfo?.update_available || state === "recording" || state === "processing"}
-            title="Download update installer"
+            title="更新インストーラーをダウンロード"
           >
             <Download size={18} />
-            Download
+            ダウンロード
           </button>
           <button
             className="primary"
             type="button"
             onClick={installUpdate}
             disabled={updateBusy || !downloadedInstaller || state === "recording" || state === "processing"}
-            title="Run downloaded installer"
+            title="ダウンロードしたインストーラーを起動"
           >
             <Upload size={18} />
-            Install
+            インストール
+          </button>
+          <button className="danger" type="button" onClick={shutdownApp} disabled={state === "recording" || state === "processing"} title="アプリを終了">
+            <Power size={18} />
+            終了
           </button>
         </div>
       </section>
 
       <section className="controls">
         <div className="controlGroup">
-          <label htmlFor="model">Whisper model</label>
+          <label htmlFor="model">文字起こしモデル</label>
           <select id="model" value={model} onChange={(event) => setModel(event.target.value)} disabled={state === "recording" || state === "processing"}>
             {modelOptions.map((option) => (
               <option key={option} value={option}>
@@ -344,7 +379,7 @@ export default function App() {
         </div>
 
         <div className="controlGroup">
-          <label htmlFor="transcribe-device">Transcribe device</label>
+          <label htmlFor="transcribe-device">処理デバイス</label>
           <select
             id="transcribe-device"
             value={transcribeDevice}
@@ -360,14 +395,14 @@ export default function App() {
         </div>
 
         <div className="controlGroup wide">
-          <label htmlFor="mic-device">Microphone</label>
+          <label htmlFor="mic-device">マイク</label>
           <select
             id="mic-device"
             value={selectedMicDeviceIndex}
             onChange={(event) => setSelectedMicDeviceIndex(event.target.value === "" ? "" : Number(event.target.value))}
             disabled={state === "recording" || state === "processing"}
           >
-            <option value="">Auto</option>
+            <option value="">自動</option>
             {micDevices.map((device) => (
               <option key={device.index} value={device.index}>
                 {deviceLabel(device)}
@@ -377,14 +412,14 @@ export default function App() {
         </div>
 
         <div className="controlGroup wide">
-          <label htmlFor="system-device">PC Output</label>
+          <label htmlFor="system-device">PC出力</label>
           <select
             id="system-device"
             value={selectedSystemDeviceIndex}
             onChange={(event) => setSelectedSystemDeviceIndex(event.target.value === "" ? "" : Number(event.target.value))}
             disabled={state === "recording" || state === "processing"}
           >
-            <option value="">Auto</option>
+            <option value="">自動</option>
             {systemDevices.map((device) => (
               <option key={device.index} value={device.index}>
                 {deviceLabel(device)}
@@ -393,30 +428,30 @@ export default function App() {
           </select>
         </div>
 
-        <button className="secondary" type="button" onClick={refreshDevices} disabled={state === "recording" || state === "processing"} title="Refresh devices">
+        <button className="secondary" type="button" onClick={refreshDevices} disabled={state === "recording" || state === "processing"} title="デバイスを再読み込み">
           <RefreshCcw size={18} />
-          Devices
+          デバイス
         </button>
 
-        <button className="primary" type="button" onClick={startRecording} disabled={state === "recording" || state === "processing"} title="Start recording">
+        <button className="primary" type="button" onClick={startRecording} disabled={state === "recording" || state === "processing"} title="録音を開始">
           <Play size={18} />
-          Start Recording
+          録音開始
         </button>
 
-        <button className="danger" type="button" onClick={stopRecording} disabled={state !== "recording"} title="Stop recording">
+        <button className="danger" type="button" onClick={stopRecording} disabled={state !== "recording"} title="録音を停止">
           <Square size={18} />
-          Stop Recording
+          録音停止
         </button>
       </section>
 
       <section className="controls rerun">
         <div className="controlGroup grow">
-          <label htmlFor="existing-output">Existing output folder</label>
+          <label htmlFor="existing-output">既存の保存フォルダ</label>
           <div className="folderPicker">
-            <input id="existing-output" value={existingOutputDir} placeholder="Select an output folder" readOnly disabled={state === "recording" || state === "processing"} />
-            <button className="secondary" type="button" onClick={pickExistingOutputFolder} disabled={state === "recording" || state === "processing"} title="Choose output folder">
+            <input id="existing-output" value={existingOutputDir} placeholder="保存フォルダを選択" readOnly disabled={state === "recording" || state === "processing"} />
+            <button className="secondary" type="button" onClick={pickExistingOutputFolder} disabled={state === "recording" || state === "processing"} title="保存フォルダを選択">
               <FolderOpen size={18} />
-              Browse
+              参照
             </button>
           </div>
         </div>
@@ -425,10 +460,10 @@ export default function App() {
           type="button"
           onClick={transcribeExisting}
           disabled={state === "recording" || state === "processing" || !existingOutputDir.trim()}
-          title="Transcribe an existing output folder"
+          title="既存の保存フォルダを文字起こし"
         >
           <Cpu size={18} />
-          Transcribe Existing Output
+          既存フォルダを文字起こし
         </button>
       </section>
 
@@ -436,43 +471,39 @@ export default function App() {
 
       <section className="grid">
         <div className="panel">
-          <h2>Saved Files</h2>
+          <h2>保存ファイル</h2>
           <div className="source">
             <Mic size={18} />
             <div>
               <span>mic.wav</span>
-              <strong>{micDevice || "Not selected"}</strong>
+              <strong>{micDevice || "未選択"}</strong>
             </div>
           </div>
           <div className="source">
             <Volume2 size={18} />
             <div>
               <span>system.wav</span>
-              <strong>{systemDevice || "Not selected"}</strong>
+              <strong>{systemDevice || "未選択"}</strong>
             </div>
           </div>
-          <div className="pathBox">{outputDir || "Output folder appears after recording starts."}</div>
+          <div className="pathBox">{outputDir || "録音開始後に保存フォルダが表示されます。"}</div>
           <div className="actions">
-            <button type="button" onClick={copyPrompt} disabled={!outputDir || state === "recording" || state === "processing"} title="Copy ChatGPT prompt">
-              <Clipboard size={18} />
-              Copy Prompt
-            </button>
-            <button type="button" onClick={openFolder} disabled={!outputDir} title="Open output folder">
+            <button type="button" onClick={openFolder} disabled={!outputDir} title="保存フォルダを開く">
               <FolderOpen size={18} />
-              Open Output
+              保存フォルダを開く
             </button>
           </div>
         </div>
 
         <div className="panel">
-          <h2>Devices</h2>
+          <h2>デバイス</h2>
           <div className="deviceList">
             {devices.length === 0 ? (
-              <p>Use the Devices button to refresh available audio devices.</p>
+              <p>デバイスボタンで利用可能な音声デバイスを再読み込みしてください。</p>
             ) : (
               devices.map((device) => (
                 <div className={`deviceRow ${device.kind}`} key={device.index}>
-                  <span>{device.kind}</span>
+                  <span>{deviceKindLabel(device.kind)}</span>
                   <strong>{deviceLabel(device)}</strong>
                 </div>
               ))
@@ -482,11 +513,11 @@ export default function App() {
       </section>
 
       <section className="events">
-        <h2>Progress</h2>
+        <h2>進行状況</h2>
         <ol>
           {events.map((event, index) => (
             <li key={`${event.event}-${index}`}>
-              <span>{event.event}</span>
+              <span>{eventLabel(event.event)}</span>
               <p>{eventMessage(event)}</p>
             </li>
           ))}
