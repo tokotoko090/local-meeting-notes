@@ -40,10 +40,11 @@ declare global {
   interface Window {
     meetingNotes: {
       listDevices: () => Promise<{ ok: boolean; output: string; devices: AudioDevice[]; error?: string }>;
-      startRecording: (options: { model: string; transcribeDevice: string; micDeviceIndex?: number | ""; systemDeviceIndex?: number | "" }) => Promise<{ ok: boolean; error?: string }>;
+      startRecording: (options: { model: string; transcribeDevice: string; micDeviceIndex?: number | ""; systemDeviceIndex?: number | ""; outputRoot?: string }) => Promise<{ ok: boolean; error?: string }>;
       stopRecording: () => Promise<{ ok: boolean; error?: string }>;
       transcribeExisting?: (options: { outputDir: string; model: string; transcribeDevice: string }) => Promise<{ ok: boolean; output_dir?: string; error?: string }>;
       pickOutputFolder?: () => Promise<{ ok: boolean; output_dir?: string; canceled?: boolean; error?: string }>;
+      pickRecordingOutputRoot?: () => Promise<{ ok: boolean; output_dir?: string; canceled?: boolean; error?: string }>;
       openOutputFolder: (outputDir?: string) => Promise<{ ok: boolean; error?: string }>;
       copyPrompt: (outputDir?: string) => Promise<{ ok: boolean; error?: string }>;
       shutdown?: () => Promise<{ ok: boolean; error?: string }>;

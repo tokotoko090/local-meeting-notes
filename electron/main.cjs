@@ -126,6 +126,10 @@ ipcMain.handle("recording:start", async (_event, options = {}) => {
   const model = options.model || "small";
   const transcribeDevice = options.transcribeDevice || "cpu";
   const args = ["record", "--model", model, "--transcribe-device", transcribeDevice];
+  if (options.outputRoot) {
+    const outputDir = path.join(options.outputRoot, new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19));
+    args.push("--output-dir", outputDir);
+  }
   if (options.micDeviceIndex !== undefined && options.micDeviceIndex !== "") {
     args.push("--mic-device-index", String(options.micDeviceIndex));
   }
@@ -173,6 +177,18 @@ ipcMain.handle("output:pick-directory", async () => {
     title: "Select an existing Local Meeting Notes output folder",
     defaultPath: path.join(root, "output"),
     properties: ["openDirectory"]
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return { ok: false, canceled: true };
+  }
+  return { ok: true, output_dir: result.filePaths[0] };
+});
+
+ipcMain.handle("output:pick-recording-root", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select where new recordings should be saved",
+    defaultPath: path.join(root, "output"),
+    properties: ["openDirectory", "createDirectory"]
   });
   if (result.canceled || result.filePaths.length === 0) {
     return { ok: false, canceled: true };

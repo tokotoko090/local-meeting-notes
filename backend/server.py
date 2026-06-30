@@ -13,6 +13,7 @@ import threading
 import urllib.error
 import urllib.request
 import webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import site
@@ -28,7 +29,7 @@ WORK_ROOT = (
     else ROOT
 )
 PYTHON = sys.executable
-SERVER_VERSION = "0.2.1"
+SERVER_VERSION = "0.2.2"
 APP_NAME = "Local Meeting Notes"
 GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -278,17 +279,33 @@ def any_process_running() -> bool:
     return bool((RECORDER and RECORDER.poll() is None) or (TRANSCRIBER and TRANSCRIBER.poll() is None))
 
 
+def resolve_recording_root(output_root: str) -> Path:
+    if not output_root.strip():
+        return WORK_ROOT / "output"
+    path = Path(output_root)
+    if not path.is_absolute():
+        path = WORK_ROOT / path
+    return path.resolve()
+
+
 def start_recording(
     model: str,
     transcribe_device: str,
     mic_device_index: int | None = None,
     system_device_index: int | None = None,
+    output_root: str = "",
 ) -> dict[str, Any]:
     global RECORDER
     if any_process_running():
         return {"ok": False, "error": "Another recording or transcription process is already running."}
 
     args = ["record", "--model", model, "--transcribe-device", transcribe_device]
+    try:
+        root = resolve_recording_root(output_root)
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"保存先フォルダを使えませんでした: {exc}"}
+    args.extend(["--output-dir", str(root / datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))])
     if mic_device_index is not None:
         args.extend(["--mic-device-index", str(mic_device_index)])
     if system_device_index is not None:
@@ -355,17 +372,23 @@ def open_output(output_dir: str | None = None) -> dict[str, Any]:
     return {"ok": True}
 
 
-def pick_output_dir() -> dict[str, Any]:
+def pick_output_dir(existing_only: bool = True) -> dict[str, Any]:
     env = os.environ.copy()
     output_root = WORK_ROOT / "output"
     env["LOCAL_MEETING_NOTES_OUTPUT_ROOT"] = str(output_root.resolve() if output_root.exists() else WORK_ROOT.resolve())
+    env["LOCAL_MEETING_NOTES_PICK_DESCRIPTION"] = (
+        "Select an existing Local Meeting Notes output folder"
+        if existing_only
+        else "Select where new recordings should be saved"
+    )
+    env["LOCAL_MEETING_NOTES_SHOW_NEW_FOLDER"] = "0" if existing_only else "1"
     script = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Application]::EnableVisualStyles()
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = 'Select an existing Local Meeting Notes output folder'
-$dialog.ShowNewFolderButton = $false
+$dialog.Description = $env:LOCAL_MEETING_NOTES_PICK_DESCRIPTION
+$dialog.ShowNewFolderButton = ($env:LOCAL_MEETING_NOTES_SHOW_NEW_FOLDER -eq '1')
 if (Test-Path -LiteralPath $env:LOCAL_MEETING_NOTES_OUTPUT_ROOT) {
   $dialog.SelectedPath = (Resolve-Path -LiteralPath $env:LOCAL_MEETING_NOTES_OUTPUT_ROOT).Path
 }
@@ -469,6 +492,7 @@ class Handler(BaseHTTPRequestHandler):
                     str(body.get("transcribeDevice") or "cpu"),
                     int(mic_index) if mic_index not in (None, "") else None,
                     int(system_index) if system_index not in (None, "") else None,
+                    str(body.get("outputRoot") or ""),
                 )
             )
             return
@@ -492,6 +516,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/output/pick-directory":
             self.send_json(pick_output_dir())
+            return
+        if self.path == "/api/output/pick-recording-root":
+            self.send_json(pick_output_dir(existing_only=False))
             return
         if self.path == "/api/update/download":
             self.send_json(download_update())

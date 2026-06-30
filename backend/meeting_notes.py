@@ -18,7 +18,7 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 SAMPLE_RATE = 48_000

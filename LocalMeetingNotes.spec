@@ -12,10 +12,11 @@ datas = [
 if Path("vendor").exists():
     datas.append(("vendor", "vendor"))
 
-for package_name in ("faster_whisper", "tokenizers", "huggingface_hub"):
+for package_name in ("faster_whisper", "tokenizers", "huggingface_hub", "onnxruntime"):
     datas += collect_data_files(package_name)
 
 datas += collect_dynamic_libs("ctranslate2")
+datas += collect_dynamic_libs("onnxruntime")
 
 hiddenimports = [
     "av",
@@ -24,6 +25,9 @@ hiddenimports = [
     "faster_whisper.audio",
     "faster_whisper.transcribe",
     "huggingface_hub",
+    "onnxruntime",
+    "onnxruntime.capi",
+    "onnxruntime.capi._pybind_state",
     "pyaudiowpatch",
     "tokenizers",
 ]
@@ -33,7 +37,6 @@ excludes = [
     "librosa",
     "numba",
     "opennmt",
-    "onnxruntime",
     "pandas",
     "pytest",
     "scipy",

@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("meetingNotes", {
   stopRecording: () => ipcRenderer.invoke("recording:stop"),
   transcribeExisting: (options) => ipcRenderer.invoke("transcribe:existing", options),
   pickOutputFolder: () => ipcRenderer.invoke("output:pick-directory"),
+  pickRecordingOutputRoot: () => ipcRenderer.invoke("output:pick-recording-root"),
   openOutputFolder: (outputDir) => ipcRenderer.invoke("output:open", outputDir),
   copyPrompt: (outputDir) => ipcRenderer.invoke("prompt:copy", outputDir),
   onBackendEvent: (callback) => {

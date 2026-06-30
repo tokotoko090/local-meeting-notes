@@ -7,6 +7,16 @@ type RecordingState = "idle" | "recording" | "processing" | "complete" | "error"
 const modelOptions = ["base", "small", "medium"];
 const transcribeDeviceOptions = ["cpu", "auto", "cuda"];
 const API_BASE = "http://127.0.0.1:8765";
+const mojibakeDeviceNameReplacements: Record<string, string> = {
+  "\ufffdT\ufffdE\ufffd\ufffd\ufffdh \ufffd}\ufffdb\ufffdp\ufffd[": "サウンド マッパー",
+  "\ufffd}\ufffdC\ufffdN": "マイク",
+  "\ufffdw\ufffdb\ufffdh\ufffdZ\ufffdb\ufffdg": "ヘッドセット",
+  "\ufffdw\ufffdb\ufffdh\ufffdz\ufffd\ufffd": "ヘッドホン",
+  "\ufffdX\ufffds\ufffd[\ufffdJ\ufffd[": "スピーカー",
+  "\ufffdC\ufffd\ufffd\ufffdt\ufffdH\ufffd\ufffd": "イヤフォン",
+  "\ufffdC\ufffd\ufffd\ufffd^\ufffdt\ufffdF\ufffd[\ufffdX": "インターフェース",
+  "\ufffdf\ufffdo\ufffdC\ufffdX": "デバイス"
+};
 
 function formatElapsed(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
@@ -15,6 +25,14 @@ function formatElapsed(seconds: number): string {
 
 function eventMessage(event: BackendEvent): string {
   return event.message || event.file || event.output_dir || event.model || event.transcribe_device || "";
+}
+
+function normalizeDeviceName(name: string): string {
+  let normalized = name.replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
+  for (const [source, target] of Object.entries(mojibakeDeviceNameReplacements)) {
+    normalized = normalized.replaceAll(source, target);
+  }
+  return normalized.replace(/\ufffd+/g, "").trim() || "Unknown";
 }
 
 function eventLabel(eventName: string): string {
@@ -53,6 +71,7 @@ export default function App() {
   const [selectedSystemDeviceIndex, setSelectedSystemDeviceIndex] = useState<number | "">("");
   const [error, setError] = useState("");
   const [outputDir, setOutputDir] = useState("");
+  const [outputRootDir, setOutputRootDir] = useState("");
   const [existingOutputDir, setExistingOutputDir] = useState("");
   const [micDevice, setMicDevice] = useState("");
   const [systemDevice, setSystemDevice] = useState("");
@@ -76,8 +95,8 @@ export default function App() {
       setElapsed(0);
       setError("");
       setState("recording");
-      setMicDevice(payload.mic_device || "");
-      setSystemDevice(payload.system_device || "");
+      setMicDevice(normalizeDeviceName(payload.mic_device || ""));
+      setSystemDevice(normalizeDeviceName(payload.system_device || ""));
     }
     if (payload.event === "recording_stopped" || payload.event === "transcription_started" || payload.event === "transcription_queued") {
       setState("processing");
@@ -160,7 +179,7 @@ export default function App() {
   async function refreshDevices() {
     const result = window.meetingNotes ? await window.meetingNotes.listDevices() : await apiCall("/api/devices");
     if (result.ok) {
-      const nextDevices: AudioDevice[] = result.devices || [];
+      const nextDevices: AudioDevice[] = (result.devices || []).map((device: AudioDevice) => ({ ...device, name: normalizeDeviceName(device.name) }));
       setDevices(nextDevices);
       if (selectedMicDeviceIndex === "") {
         const firstMic = nextDevices.find((device) => device.kind === "mic" && device.sample_rate === 48000) || nextDevices.find((device) => device.kind === "mic");
@@ -180,7 +199,7 @@ export default function App() {
   }
 
   async function startRecording() {
-    const options = { model, transcribeDevice, micDeviceIndex: selectedMicDeviceIndex, systemDeviceIndex: selectedSystemDeviceIndex };
+    const options = { model, transcribeDevice, micDeviceIndex: selectedMicDeviceIndex, systemDeviceIndex: selectedSystemDeviceIndex, outputRoot: outputRootDir };
     const result = window.meetingNotes ? await window.meetingNotes.startRecording(options) : await apiCall("/api/recording/start", options);
     if (!result.ok) {
       setError(result.error || "録音を開始できませんでした。");
@@ -229,6 +248,18 @@ export default function App() {
     }
     if (!result.canceled) {
       setError(result.error || "フォルダ選択を開けませんでした。");
+    }
+  }
+
+  async function pickRecordingOutputRoot() {
+    setError("");
+    const result = window.meetingNotes?.pickRecordingOutputRoot ? await window.meetingNotes.pickRecordingOutputRoot() : await apiCall("/api/output/pick-recording-root", {});
+    if (result.ok && result.output_dir) {
+      setOutputRootDir(result.output_dir);
+      return;
+    }
+    if (!result.canceled) {
+      setError(result.error || "保存先を選択できませんでした。");
     }
   }
 
@@ -304,7 +335,7 @@ export default function App() {
   const systemDevices = devices.filter((device) => device.kind === "system");
 
   function deviceLabel(device: AudioDevice): string {
-    return `[${device.index}] ${device.name} (${device.channels}ch, ${device.sample_rate}Hz)`;
+    return `[${device.index}] ${normalizeDeviceName(device.name)} (${device.channels}ch, ${device.sample_rate}Hz)`;
   }
 
   return (
@@ -442,6 +473,25 @@ export default function App() {
           <Square size={18} />
           録音停止
         </button>
+      </section>
+
+      <section className="controls rerun">
+        <div className="controlGroup grow">
+          <label htmlFor="recording-output-root">録音の保存先</label>
+          <div className="folderPicker">
+            <input
+              id="recording-output-root"
+              value={outputRootDir}
+              placeholder="未指定の場合は標準の output フォルダに保存"
+              readOnly
+              disabled={state === "recording" || state === "processing"}
+            />
+            <button className="secondary" type="button" onClick={pickRecordingOutputRoot} disabled={state === "recording" || state === "processing"} title="録音の保存先を選択">
+              <FolderOpen size={18} />
+              参照
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="controls rerun">
