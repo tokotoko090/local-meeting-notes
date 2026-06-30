@@ -48,6 +48,13 @@ export type GpuStatusResult = {
   error?: string;
 };
 
+export type SettingsResult = {
+  ok: boolean;
+  output_root?: string;
+  default_output_root?: string;
+  error?: string;
+};
+
 declare global {
   interface Window {
     meetingNotes: {

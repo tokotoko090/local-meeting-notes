@@ -30,7 +30,7 @@ WORK_ROOT = (
     else ROOT
 )
 PYTHON = sys.executable
-SERVER_VERSION = "0.2.3"
+SERVER_VERSION = "0.2.4"
 APP_NAME = "Local Meeting Notes"
 GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -45,6 +45,7 @@ TRANSCRIBER: subprocess.Popen[str] | None = None
 LATEST_OUTPUT_DIR: str | None = None
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 LOG_PATH = WORK_ROOT / "server.log"
+SETTINGS_PATH = WORK_ROOT / "settings.json"
 DOWNLOADED_INSTALLER: Path | None = None
 GPU_RUNTIME_ROOT = WORK_ROOT / "gpu-runtime"
 GPU_RUNTIME_PACKAGES = [
@@ -56,6 +57,60 @@ GPU_RUNTIME_PACKAGES = [
 
 class UserFacingValueError(ValueError):
     pass
+
+
+def configure_standard_streams() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def default_output_root() -> Path:
+    return WORK_ROOT / "output"
+
+
+def load_settings() -> dict[str, Any]:
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        log(f"settings load failed: {exc}")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def settings_payload() -> dict[str, Any]:
+    settings = load_settings()
+    output_root = str(settings.get("output_root") or "").strip()
+    return {
+        "ok": True,
+        "output_root": output_root,
+        "default_output_root": str(default_output_root()),
+    }
+
+
+def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    settings = load_settings()
+    if "output_root" in payload:
+        output_root = str(payload.get("output_root") or "").strip()
+        if output_root:
+            path = Path(output_root)
+            if not path.is_absolute():
+                path = WORK_ROOT / path
+            settings["output_root"] = str(path.resolve())
+        else:
+            settings.pop("output_root", None)
+    save_settings(settings)
+    return settings_payload()
 
 
 def log(message: str) -> None:
@@ -300,11 +355,11 @@ def gpu_status() -> dict[str, Any]:
     if runtime_ready and probe.get("available"):
         state = "available"
         label = "GPU利用可能"
-        message = "GPU高速化コンポーネントは導入済みです。"
+        message = "GPU(CUDA)対応コンポーネントは導入済みです。"
     elif probe.get("available"):
         state = "setup_available"
-        label = "GPUセットアップ可能"
-        message = "NVIDIA GPUを検出しました。GPU高速化コンポーネントをこのアプリ専用に追加インストールできます。"
+        label = "GPU(CUDA)セットアップ可能"
+        message = "NVIDIA GPUを検出しました。GPU(CUDA)対応コンポーネントをこのアプリ専用に追加インストールできます。"
     else:
         state = "cpu"
         label = "CPUで実行中"
@@ -364,7 +419,7 @@ def extract_nvidia_dlls(wheel_path: Path) -> int:
 
 def setup_gpu_runtime() -> dict[str, Any]:
     if any_process_running():
-        return {"ok": False, "state": "setup_failed", "label": "GPUセットアップ失敗", "error": "録音または文字起こしが終わってからGPUセットアップを実行してください。"}
+        return {"ok": False, "state": "setup_failed", "label": "GPU(CUDA)セットアップ失敗", "error": "録音または文字起こしが終わってからGPU(CUDA)セットアップを実行してください。"}
     temp_dir = WORK_ROOT / "gpu-runtime-downloads"
     temp_dir.mkdir(parents=True, exist_ok=True)
     installed: list[dict[str, Any]] = []
@@ -379,11 +434,11 @@ def setup_gpu_runtime() -> dict[str, Any]:
         return {
             "ok": False,
             "state": "setup_failed",
-            "label": "GPUセットアップ失敗、CPUで続行",
-            "error": f"GPU高速化コンポーネントを追加インストールできませんでした: {exc}",
+            "label": "GPU(CUDA)セットアップ失敗、CPUで続行",
+            "error": f"GPU(CUDA)対応コンポーネントを追加インストールできませんでした: {exc}",
         }
     status = gpu_status()
-    status.update({"installed": installed, "message": "GPU高速化コンポーネントを追加インストールしました。"})
+    status.update({"installed": installed, "message": "GPU(CUDA)対応コンポーネントを追加インストールしました。"})
     return status
 
 
@@ -428,7 +483,10 @@ def any_process_running() -> bool:
 
 def resolve_recording_root(output_root: str) -> Path:
     if not output_root.strip():
-        return WORK_ROOT / "output"
+        saved_output_root = str(load_settings().get("output_root") or "").strip()
+        if saved_output_root:
+            return Path(saved_output_root).resolve()
+        return default_output_root()
     path = Path(output_root)
     if not path.is_absolute():
         path = WORK_ROOT / path
@@ -450,6 +508,8 @@ def start_recording(
     try:
         root = resolve_recording_root(output_root)
         root.mkdir(parents=True, exist_ok=True)
+        if output_root.strip():
+            update_settings({"output_root": str(root)})
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"保存先フォルダを使えませんでした: {exc}"}
     args.extend(["--output-dir", str(root / datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))])
@@ -521,7 +581,8 @@ def open_output(output_dir: str | None = None) -> dict[str, Any]:
 
 def pick_output_dir(existing_only: bool = True) -> dict[str, Any]:
     env = os.environ.copy()
-    output_root = WORK_ROOT / "output"
+    settings = load_settings()
+    output_root = Path(str(settings.get("output_root") or default_output_root()))
     env["LOCAL_MEETING_NOTES_OUTPUT_ROOT"] = str(output_root.resolve() if output_root.exists() else WORK_ROOT.resolve())
     env["LOCAL_MEETING_NOTES_PICK_DESCRIPTION"] = (
         "Select an existing Local Meeting Notes output folder"
@@ -557,7 +618,10 @@ exit 3
         check=False,
     )
     if result.returncode == 0 and result.stdout.strip():
-        return {"ok": True, "output_dir": result.stdout.strip().splitlines()[-1]}
+        selected = result.stdout.strip().splitlines()[-1]
+        if not existing_only:
+            update_settings({"output_root": selected})
+        return {"ok": True, "output_dir": selected}
     if result.returncode == 3:
         return {"ok": False, "canceled": True}
     return {"ok": False, "error": result.stderr.strip() or "Could not open the folder picker."}
@@ -604,6 +668,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/gpu/status":
             self.send_json(gpu_status())
+            return
+        if parsed.path == "/api/settings":
+            self.send_json(settings_payload())
             return
         if parsed.path == "/api/events":
             query = parse_qs(parsed.query)
@@ -670,6 +737,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/output/pick-recording-root":
             self.send_json(pick_output_dir(existing_only=False))
             return
+        if self.path == "/api/settings":
+            self.send_json(update_settings(body))
+            return
         if self.path == "/api/gpu/setup":
             self.send_json(setup_gpu_runtime())
             return
@@ -690,6 +760,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    configure_standard_streams()
     try:
         server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
         url = "http://127.0.0.1:8765"

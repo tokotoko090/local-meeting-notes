@@ -1,6 +1,6 @@
 import { Cpu, Download, FolderOpen, Mic, Play, Power, RefreshCcw, Square, Upload, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AudioDevice, BackendEvent, GpuStatusResult, UpdateCheckResult } from "./vite-env";
+import type { AudioDevice, BackendEvent, GpuStatusResult, SettingsResult, UpdateCheckResult } from "./vite-env";
 
 type RecordingState = "idle" | "recording" | "processing" | "complete" | "error";
 
@@ -25,6 +25,10 @@ function formatElapsed(seconds: number): string {
 
 function eventMessage(event: BackendEvent): string {
   return event.message || event.file || event.output_dir || event.model || event.transcribe_device || "";
+}
+
+function normalizeDisplayText(text: string): string {
+  return text.replace(/\u0000/g, "").trim();
 }
 
 function normalizeDeviceName(name: string): string {
@@ -72,6 +76,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [outputRootDir, setOutputRootDir] = useState("");
+  const [defaultOutputRootDir, setDefaultOutputRootDir] = useState("");
   const [existingOutputDir, setExistingOutputDir] = useState("");
   const [micDevice, setMicDevice] = useState("");
   const [systemDevice, setSystemDevice] = useState("");
@@ -90,7 +95,7 @@ export default function App() {
     setEvents((current) => [payload, ...current].slice(0, 14));
 
     if (payload.output_dir) {
-      setOutputDir(payload.output_dir);
+      setOutputDir(normalizeDisplayText(payload.output_dir));
     }
     if (payload.event === "recording_started") {
       startedAt.current = Date.now();
@@ -133,6 +138,26 @@ export default function App() {
       body: body ? JSON.stringify(body) : undefined
     });
     return response.json();
+  }
+
+  async function loadSettings() {
+    try {
+      const result: SettingsResult = await apiCall("/api/settings");
+      if (result.ok) {
+        setOutputRootDir(normalizeDisplayText(result.output_root || ""));
+        setDefaultOutputRootDir(normalizeDisplayText(result.default_output_root || ""));
+      }
+    } catch {
+      setDefaultOutputRootDir("");
+    }
+  }
+
+  async function saveOutputRoot(outputRoot: string) {
+    const result: SettingsResult = await apiCall("/api/settings", { output_root: outputRoot });
+    if (result.ok) {
+      setOutputRootDir(normalizeDisplayText(result.output_root || ""));
+      setDefaultOutputRootDir(normalizeDisplayText(result.default_output_root || ""));
+    }
   }
 
   useEffect(() => {
@@ -236,8 +261,8 @@ export default function App() {
       return;
     }
     if (result.output_dir) {
-      setOutputDir(result.output_dir);
-      setExistingOutputDir(result.output_dir);
+      setOutputDir(normalizeDisplayText(result.output_dir));
+      setExistingOutputDir(normalizeDisplayText(result.output_dir));
     }
   }
 
@@ -245,7 +270,7 @@ export default function App() {
     setError("");
     const result = window.meetingNotes?.pickOutputFolder ? await window.meetingNotes.pickOutputFolder() : await apiCall("/api/output/pick-directory", {});
     if (result.ok && result.output_dir) {
-      setExistingOutputDir(result.output_dir);
+      setExistingOutputDir(normalizeDisplayText(result.output_dir));
       return;
     }
     if (!result.canceled) {
@@ -257,7 +282,7 @@ export default function App() {
     setError("");
     const result = window.meetingNotes?.pickRecordingOutputRoot ? await window.meetingNotes.pickRecordingOutputRoot() : await apiCall("/api/output/pick-recording-root", {});
     if (result.ok && result.output_dir) {
-      setOutputRootDir(result.output_dir);
+      await saveOutputRoot(result.output_dir);
       return;
     }
     if (!result.canceled) {
@@ -276,12 +301,12 @@ export default function App() {
 
   async function setupGpuRuntime() {
     setGpuBusy(true);
-    setGpuStatus({ ok: true, state: "setting_up", label: "GPUセットアップ中", message: "GPU高速化コンポーネントを追加インストールしています。" });
+    setGpuStatus({ ok: true, state: "setting_up", label: "GPU(CUDA)セットアップ中", message: "GPU(CUDA)対応コンポーネントを追加インストールしています。" });
     try {
       const result: GpuStatusResult = await apiCall("/api/gpu/setup", {});
       setGpuStatus(result);
       if (!result.ok) {
-        setError(result.error || "GPUセットアップに失敗しました。CPUで続行できます。");
+        setError(result.error || "GPU(CUDA)セットアップに失敗しました。CPUで続行できます。");
       } else {
         setError("");
       }
@@ -357,6 +382,7 @@ export default function App() {
   useEffect(() => {
     void refreshDevices();
     void refreshGpuStatus();
+    void loadSettings();
   }, []);
 
   const micDevices = devices.filter((device) => device.kind === "mic");
@@ -427,7 +453,7 @@ export default function App() {
 
       <section className="updateBar">
         <div>
-          <h2>GPU高速化</h2>
+          <h2>GPU(CUDA)対応</h2>
           <p>{gpuStatus?.error || gpuStatus?.message || "GPU状態を確認しています。"}</p>
           <strong>{gpuStatus?.label || "確認中"}</strong>
         </div>
@@ -441,10 +467,10 @@ export default function App() {
             type="button"
             onClick={setupGpuRuntime}
             disabled={gpuBusy || state === "recording" || state === "processing" || !["setup_available", "setup_failed"].includes(gpuStatus?.state || "")}
-            title="このアプリ専用にGPU高速化コンポーネントを追加インストール"
+            title="このアプリ専用にGPU(CUDA)対応コンポーネントを追加インストール"
           >
             <Download size={18} />
-            GPUセットアップ
+            GPU(CUDA)セットアップ
           </button>
         </div>
       </section>
@@ -534,7 +560,7 @@ export default function App() {
             <input
               id="recording-output-root"
               value={outputRootDir}
-              placeholder="未指定の場合は標準の output フォルダに保存"
+              placeholder={defaultOutputRootDir || "標準の保存先を読み込み中"}
               readOnly
               disabled={state === "recording" || state === "processing"}
             />

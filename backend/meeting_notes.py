@@ -18,7 +18,7 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 DEFAULT_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"
@@ -27,6 +27,16 @@ SAMPLE_RATE = 48_000
 CHANNELS = 2
 FRAMES_PER_BUFFER = 2048
 CUDA_DISABLED = False
+
+
+def configure_standard_streams() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
 
 MOJIBAKE_REPLACEMENTS = {
     "�T�E���h �}�b�p�[": "サウンド マッパー",
@@ -85,7 +95,7 @@ def classify_cuda_error(error: Exception) -> tuple[str, str]:
     if "cublas64_12.dll" in lowered or "cudnn" in lowered or "nvrtc" in lowered:
         return (
             "gpu_runtime_missing",
-            "GPU高速化コンポーネントが未導入です。CPUで続行します。画面上部のGPUセットアップから、このアプリ専用に追加インストールできます。",
+            "GPU(CUDA)対応コンポーネントが未導入です。CPUで続行します。画面上部のGPU(CUDA)セットアップから、このアプリ専用に追加インストールできます。",
         )
     if "cuda driver" in lowered or "driver" in lowered or "cuda_error_no_device" in lowered:
         return ("gpu_driver_missing", "NVIDIAドライバーが古い、または見つかりません。CPUで続行します。")
@@ -770,6 +780,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_standard_streams()
     parser = build_parser()
     args = parser.parse_args()
     try:
