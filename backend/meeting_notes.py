@@ -18,7 +18,7 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 SAMPLE_RATE = 48_000
@@ -47,11 +47,15 @@ _CUDA_DLL_HANDLES: list[Any] = []
 
 def configure_cuda_dll_paths() -> list[str]:
     paths: list[str] = []
-    for site_path in site.getsitepackages():
-        nvidia_root = Path(site_path) / "nvidia"
+    nvidia_roots = [
+        *(Path(site_path) / "nvidia" for site_path in site.getsitepackages()),
+        RESOURCE_ROOT / "nvidia",
+        Path(sys.executable).resolve().parent / "nvidia",
+    ]
+    for nvidia_root in nvidia_roots:
         for relative in ("cublas/bin", "cudnn/bin", "cuda_nvrtc/bin"):
             candidate = nvidia_root / relative
-            if candidate.exists():
+            if candidate.exists() and str(candidate) not in paths:
                 paths.append(str(candidate))
 
     if not paths:

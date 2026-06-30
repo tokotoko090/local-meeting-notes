@@ -29,7 +29,7 @@ WORK_ROOT = (
     else ROOT
 )
 PYTHON = sys.executable
-SERVER_VERSION = "0.2.2"
+SERVER_VERSION = "0.2.3"
 APP_NAME = "Local Meeting Notes"
 GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -67,11 +67,15 @@ def backend_env() -> dict[str, str]:
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     cuda_paths = []
-    for site_path in site.getsitepackages():
-        nvidia_root = Path(site_path) / "nvidia"
+    nvidia_roots = [
+        *(Path(site_path) / "nvidia" for site_path in site.getsitepackages()),
+        RESOURCE_ROOT / "nvidia",
+        Path(PYTHON).resolve().parent / "nvidia",
+    ]
+    for nvidia_root in nvidia_roots:
         for relative in ("cublas/bin", "cudnn/bin", "cuda_nvrtc/bin"):
             candidate = nvidia_root / relative
-            if candidate.exists():
+            if candidate.exists() and str(candidate) not in cuda_paths:
                 cuda_paths.append(str(candidate))
     if cuda_paths:
         env["PATH"] = os.pathsep.join([*cuda_paths, env.get("PATH", "")])
