@@ -18,7 +18,7 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 DEFAULT_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"

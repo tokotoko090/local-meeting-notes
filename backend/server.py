@@ -30,7 +30,7 @@ WORK_ROOT = (
     else ROOT
 )
 PYTHON = sys.executable
-SERVER_VERSION = "0.2.5"
+SERVER_VERSION = "0.2.6"
 APP_NAME = "Local Meeting Notes"
 GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -294,10 +294,20 @@ def install_update() -> dict[str, Any]:
     if not DOWNLOADED_INSTALLER or not DOWNLOADED_INSTALLER.exists():
         return {"ok": False, "error": "Download the update before installing it."}
     try:
-        subprocess.Popen([str(DOWNLOADED_INSTALLER)], cwd=str(DOWNLOADED_INSTALLER.parent))
+        launcher = (
+            f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; "
+            "Start-Sleep -Milliseconds 700; "
+            f"Start-Process -FilePath {json.dumps(str(DOWNLOADED_INSTALLER))} "
+            f"-WorkingDirectory {json.dumps(str(DOWNLOADED_INSTALLER.parent))}"
+        )
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", launcher],
+            cwd=str(DOWNLOADED_INSTALLER.parent),
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"Could not start installer: {exc}"}
-    threading.Timer(1.0, lambda: os._exit(0)).start()
+    threading.Timer(0.2, lambda: os._exit(0)).start()
     return {"ok": True}
 
 

@@ -19,6 +19,7 @@ UninstPage uninstConfirm
 UninstPage instfiles
 
 Section "Install"
+  ExecWait '"$SYSDIR\taskkill.exe" /IM "${EXE_NAME}" /F'
   SetOutPath "$INSTDIR"
   File "..\dist-app\${EXE_NAME}"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
