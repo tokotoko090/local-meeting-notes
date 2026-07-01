@@ -376,7 +376,14 @@ export default function App() {
       return;
     }
     setState("complete");
-    setError("アプリを終了しています。このタブを閉じてください。");
+    setError("アプリを終了しています。タブを閉じます。");
+    window.setTimeout(() => {
+      window.open("", "_self");
+      window.close();
+      window.setTimeout(() => {
+        setError("アプリは終了しました。ブラウザがタブを閉じなかった場合は、このタブを閉じてください。");
+      }, 500);
+    }, 250);
   }
 
   useEffect(() => {
