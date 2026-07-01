@@ -18,7 +18,7 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.4"
+APP_VERSION = "0.2.5"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 DEFAULT_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"
@@ -581,7 +581,7 @@ def prepare_audio_for_whisper(audio_path: Path) -> Path:
         "error",
         "-y",
         "-i",
-        str(audio_path),
+        "pipe:0",
         "-vn",
         "-ac",
         "1",
@@ -589,9 +589,36 @@ def prepare_audio_for_whisper(audio_path: Path) -> Path:
         "16000",
         "-sample_fmt",
         "s16",
-        str(prepared_path),
+        "-f",
+        "wav",
+        "pipe:1",
     ]
-    subprocess.run(command, check=True)
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        with audio_path.open("rb") as source:
+            shutil.copyfileobj(source, process.stdin)
+        process.stdin.close()
+        with prepared_path.open("wb") as destination:
+            shutil.copyfileobj(process.stdout, destination)
+        stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+        code = process.wait()
+    except Exception:
+        if prepared_path.exists():
+            prepared_path.unlink(missing_ok=True)
+        raise
+    if code != 0:
+        if prepared_path.exists():
+            prepared_path.unlink(missing_ok=True)
+        detail = f": {stderr}" if stderr else ""
+        raise UserFacingError(f"Whisper用の音声変換に失敗しました{detail}")
     return prepared_path
 
 
