@@ -19,7 +19,7 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.7"
+APP_VERSION = "0.2.8"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 DEFAULT_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"
@@ -115,6 +115,21 @@ def configure_binary_paths() -> None:
     additions = [str(path) for path in candidates if path.exists() and str(path).lower() not in existing]
     if additions:
         os.environ["PATH"] = os.pathsep.join([*additions, os.environ.get("PATH", "")])
+
+
+def resolve_ffmpeg() -> str | None:
+    configure_binary_paths()
+    candidates = [
+        RESOURCE_ROOT / "vendor" / "ffmpeg.exe",
+        RESOURCE_ROOT / "ffmpeg" / "ffmpeg.exe",
+        Path(sys.executable).resolve().parent / "vendor" / "ffmpeg.exe",
+        Path(sys.executable).resolve().parent / "ffmpeg.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    found = shutil.which("ffmpeg.exe") or shutil.which("ffmpeg")
+    return found
 
 
 def normalize_device_name(name: str) -> str:
@@ -389,7 +404,7 @@ def has_audio_frames(path: Path) -> bool:
 
 def run_record(args: argparse.Namespace) -> int:
     configure_binary_paths()
-    if shutil.which("ffmpeg") is None:
+    if resolve_ffmpeg() is None:
         raise UserFacingError("ffmpeg was not found in PATH. Install ffmpeg before recording.")
 
     output_dir = Path(args.output_dir) if args.output_dir else timestamp_dir(Path("output"))
@@ -568,11 +583,11 @@ def whisper_runtime_attempts(transcribe_device: str) -> list[tuple[str, str]]:
 
 
 def prepare_audio_for_whisper(audio_path: Path) -> Path:
-    configure_binary_paths()
+    ffmpeg = resolve_ffmpeg()
     prepared_path = audio_path.with_name(f"{audio_path.stem}_whisper.wav")
     if prepared_path.exists() and prepared_path.stat().st_mtime >= audio_path.stat().st_mtime:
         return prepared_path
-    if shutil.which("ffmpeg") is None:
+    if ffmpeg is None:
         return audio_path
 
     with tempfile.TemporaryDirectory(prefix="local-meeting-notes-") as temp_dir:
@@ -581,7 +596,7 @@ def prepare_audio_for_whisper(audio_path: Path) -> Path:
         temp_output = temp_root / "output.wav"
         shutil.copyfile(audio_path, temp_input)
         command = [
-            "ffmpeg",
+            ffmpeg,
             "-hide_banner",
             "-loglevel",
             "error",
