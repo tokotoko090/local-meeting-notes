@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -18,7 +19,7 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 DEFAULT_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"
@@ -574,51 +575,34 @@ def prepare_audio_for_whisper(audio_path: Path) -> Path:
     if shutil.which("ffmpeg") is None:
         return audio_path
 
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        "pipe:0",
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-sample_fmt",
-        "s16",
-        "-f",
-        "wav",
-        "pipe:1",
-    ]
-    try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
-        with audio_path.open("rb") as source:
-            shutil.copyfileobj(source, process.stdin)
-        process.stdin.close()
-        with prepared_path.open("wb") as destination:
-            shutil.copyfileobj(process.stdout, destination)
-        stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
-        code = process.wait()
-    except Exception:
-        if prepared_path.exists():
-            prepared_path.unlink(missing_ok=True)
-        raise
-    if code != 0:
-        if prepared_path.exists():
-            prepared_path.unlink(missing_ok=True)
-        detail = f": {stderr}" if stderr else ""
-        raise UserFacingError(f"Whisper用の音声変換に失敗しました{detail}")
+    with tempfile.TemporaryDirectory(prefix="local-meeting-notes-") as temp_dir:
+        temp_root = Path(temp_dir)
+        temp_input = temp_root / "input.wav"
+        temp_output = temp_root / "output.wav"
+        shutil.copyfile(audio_path, temp_input)
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(temp_input),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-sample_fmt",
+            "s16",
+            str(temp_output),
+        ]
+        result = subprocess.run(command, text=True, capture_output=True, check=False, encoding="utf-8", errors="replace")
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            suffix = f": {detail}" if detail else ""
+            raise UserFacingError(f"Whisper用の音声変換に失敗しました{suffix}")
+        shutil.copyfile(temp_output, prepared_path)
     return prepared_path
 
 
