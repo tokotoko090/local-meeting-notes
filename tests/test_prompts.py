@@ -147,7 +147,12 @@ class PromptTests(unittest.TestCase):
         outside = self.root / 'outside.md'
         outside.write_text('protected')
         self.prompt.unlink()
-        self.prompt.symlink_to(outside)
+        try:
+            self.prompt.symlink_to(outside)
+        except OSError as exc:
+            if os.name == 'nt' and getattr(exc, 'winerror', None) == 1314:
+                self.skipTest('Windows symlink privilege is unavailable')
+            raise
         self.assertFalse(server.save_prompt(str(self.recording), 'changed')['saved'])
         self.assertFalse(server.read_prompt(str(self.recording))['ok'])
         self.assertEqual(outside.read_text(encoding="utf-8"), 'protected')

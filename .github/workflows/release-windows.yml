@@ -38,7 +38,7 @@ jobs:
       - name: Install system tools
         shell: powershell
         run: |
-          choco install ffmpeg nsis -y --no-progress
+          choco install nsis -y --no-progress
 
       - name: Install dependencies and build
         shell: powershell

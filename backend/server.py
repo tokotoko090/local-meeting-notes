@@ -110,17 +110,33 @@ def save_settings(settings: dict[str, Any]) -> None:
 def settings_payload() -> dict[str, Any]:
     settings = load_settings()
     output_root = str(settings.get("output_root") or "").strip()
+    models, devices, default_model, default_device = transcription_setting_choices()
     return {
         "ok": True,
         "output_root": output_root,
         "default_output_root": str(default_output_root()),
         "prompt_template": settings.get("prompt_template", DEFAULT_PROMPT_TEMPLATE),
         "default_prompt_template": DEFAULT_PROMPT_TEMPLATE,
+        "model": settings.get("model") if settings.get("model") in models else default_model,
+        "transcribe_device": settings.get("transcribe_device") if settings.get("transcribe_device") in devices else default_device,
     }
+
+
+def transcription_setting_choices() -> tuple[set[str], set[str], str, str]:
+    if sys.platform == "darwin":
+        from backend.mlx_transcription import DEFAULT_MODEL, MODEL_OPTIONS
+        return {option["id"] for option in MODEL_OPTIONS}, {"mlx"}, DEFAULT_MODEL, "mlx"
+    return {"base", "small", "medium"}, {"cpu", "auto", "cuda"}, "base", "cpu"
 
 
 def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
     settings = load_settings()
+    models, devices, _, _ = transcription_setting_choices()
+    for key, choices in (("model", models), ("transcribe_device", devices)):
+        if key in payload:
+            if not isinstance(payload[key], str) or payload[key] not in choices:
+                return {"ok": False, "error": "文字起こし設定の値が不正です。"}
+            settings[key] = payload[key]
     if "prompt_template" in payload:
         if SHUTTING_DOWN or any_process_running():
             return {"ok": False, "error": "録音・処理・終了中はプロンプト設定を変更できません。"}
@@ -719,10 +735,15 @@ def read_prompt(output_dir: str) -> dict[str, Any]:
 
 
 def copy_text(text: str) -> dict[str, Any]:
-    command = ["/usr/bin/pbcopy"] if sys.platform == "darwin" else ["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value $input"]
+    command = ["/usr/bin/pbcopy"] if sys.platform == "darwin" else [
+        "powershell", "-NoProfile", "-Command",
+        "$ErrorActionPreference = 'Stop'; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false); "
+        "Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+    ]
     try:
-        result = subprocess.run(command, input=text, text=True, encoding="utf-8", capture_output=True, check=False)
-        return {"ok": result.returncode == 0, "error": result.stderr.strip()}
+        # Binary stdin preserves line endings as well as Unicode on Windows.
+        result = subprocess.run(command, input=text.encode("utf-8"), capture_output=True, check=False)
+        return {"ok": result.returncode == 0, "error": result.stderr.decode("utf-8", errors="replace").strip()}
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
 

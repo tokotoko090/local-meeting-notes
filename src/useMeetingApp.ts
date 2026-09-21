@@ -179,6 +179,8 @@ export function useMeetingApp() {
     try {
       const result: SettingsResult = await apiCall("/api/settings");
       if (result.ok) {
+        if (result.model) setModel(result.model);
+        if (result.transcribe_device) setTranscribeDevice(result.transcribe_device);
         setPromptTemplate(result.prompt_template ?? "");
         setDefaultPromptTemplate(result.default_prompt_template ?? "");
         setSettingsLoaded(true);
@@ -188,6 +190,17 @@ export function useMeetingApp() {
     } catch {
       setDefaultOutputRootDir("");
     }
+  }
+
+  async function saveTranscriptionSetting(key: "model" | "transcribe_device", value: string) {
+    if (!settingsLoaded) return;
+    const result: SettingsResult = await apiCall("/api/settings", { [key]: value });
+    if (!result.ok) {
+      setNotice(result.error || "設定を保存できませんでした。");
+      return;
+    }
+    if (key === "model") setModel(result.model ?? value);
+    else setTranscribeDevice(result.transcribe_device ?? value);
   }
 
   async function savePromptTemplate(text: string): Promise<SettingsResult> {
@@ -488,9 +501,9 @@ export function useMeetingApp() {
   }
 
   useEffect(() => {
-    void refreshCapabilities();
+    // Apply validated saved choices after capability defaults, regardless of request timing.
+    void refreshCapabilities().then(loadSettings);
     void refreshDevices();
-    void loadSettings();
   }, []);
 
   useEffect(() => {
@@ -511,8 +524,8 @@ export function useMeetingApp() {
 
 
   const busy = closing || state === "starting" || state === "recording" || state === "processing";
-  return { capabilities, closing, promptReady, copyStatus, state, model, setModel,
-    transcribeDevice, setTranscribeDevice, devices, selectedMicDeviceIndex, setSelectedMicDeviceIndex,
+  return { capabilities, closing, promptReady, copyStatus, state, model, setModel: (value: string) => void saveTranscriptionSetting("model", value),
+    transcribeDevice, setTranscribeDevice: (value: string) => void saveTranscriptionSetting("transcribe_device", value), devices, selectedMicDeviceIndex, setSelectedMicDeviceIndex,
     selectedSystemDeviceIndex, setSelectedSystemDeviceIndex, error, outputDir, outputRootDir,
     defaultOutputRootDir, promptTemplate, defaultPromptTemplate, settingsLoaded, savePromptTemplate, readPrompt, savePrompt, existingOutputDir, setExistingOutputDir, micDevice, systemDevice, elapsed, events,
     updateInfo, updateStatus, updateBusy, downloadedInstaller, gpuStatus, gpuBusy, statusLabel, busy, devicesLoaded,

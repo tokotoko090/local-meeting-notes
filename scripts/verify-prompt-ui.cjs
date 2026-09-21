@@ -98,14 +98,29 @@ async function promptFlow() {
   const custom = '# 編集済みプロンプト\n\n重要な決定事項だけを抽出してください。\n\n' + original;
   await edit(promptSelector, custom);
   await until(() => document.documentElement.dataset.promptDirty === 'true');
-  await api('/__fixture/config', { delay_save_ms: 800 });
-  await button('保存してコピー');
-  await until(() => document.documentElement.dataset.promptSaving === 'true');
-  await closeDialog();
-  assert(await js(() => !!document.querySelector('dialog[open]')), 'Cannot dismiss while saving');
+  // Hold this request until the saving-state assertions finish. A timed fixture
+  // delay can expire before Windows delivers the pointer/frame acknowledgments.
+  await js(() => {
+    const originalFetch = window.fetch;
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    window.__releasePromptSave = () => { window.fetch = originalFetch; release(); };
+    window.fetch = async (...args) => {
+      if (String(args[0]).endsWith('/api/prompt/save')) await pending;
+      return originalFetch.apply(window, args);
+    };
+  });
+  try {
+    await button('保存してコピー');
+    await until(() => document.documentElement.dataset.promptSaving === 'true');
+    await closeDialog();
+    assert(await js(() => !!document.querySelector('dialog[open]')), 'Cannot dismiss while saving');
+    assert(await js(() => document.documentElement.dataset.promptSaving === 'true'), 'Escape must not finish the pending save');
+  } finally {
+    await js(() => { window.__releasePromptSave(); delete window.__releasePromptSave; });
+  }
   await until(() => document.body.innerText.includes('コピーしました'));
   await until(() => document.documentElement.dataset.promptSaving === 'false');
-  await api('/__fixture/config', { delay_save_ms: 0 });
   let state = await api('/__fixture/state'); assert.equal(state.prompt_text, custom); assert.equal(state.copied_text, custom, 'Copies exact edited text');
   await closeDialog(); await openPrompt(); assert.equal(await value(promptSelector), custom);
   await edit(promptSelector, custom + '\n破棄する草稿');

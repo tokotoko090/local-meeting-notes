@@ -1,5 +1,17 @@
 # リリース手順
 
+## Windows の ffmpeg と修正候補
+
+`scripts/build-windows.ps1` は `scripts/prepare_windows_ffmpeg.py` で gyan.dev の ZIP と公開 SHA-256 を取得し、ハッシュ・ZIP パス・単体 EXE の実行と WAV 変換を検証します。Chocolatey の `Get-Command ffmpeg.exe` は実体ではなく shim を返すため、コピーして配布しないでください。実体は NSIS がインストール先の `vendor/ffmpeg.exe` に配置します。PyInstaller の展開先に ffmpeg を同梱しません。
+
+CI は検証済みダウンロード必須です。ローカルのみ、ネットワーク障害時に既存 `vendor/ffmpeg.exe` を隔離ディレクトリで同じ変換テストに通した場合に再利用できます。チェックサム不一致や変換失敗ではキャッシュにフォールバックしません。
+
+既存の v0.3.0 タグは `3eac0985e40c40ffd7ad1fa392235794d43dc907` の候補を指しています。今回の Windows 修正候補は同じ `LocalMeetingNotesSetup-0.3.0.exe` という名前でも別の成果物です。保存先と `windows-manifest.json` の source commit / SHA-256 で区別し、既存タグや共通ドラフトの成果物を移動・差し替えしないでください。Mac も新しい候補コミットから再ビルド・実機検証してから、次の共通候補を決めます。
+
+Windows の検証ではインストーラーから導入した EXE を使用し、専用 `LOCAL_MEETING_NOTES_DATA_ROOT` と保存フォルダで録音・停止・CPU/CUDA・プロンプト編集とコピー・再起動を確認します。v0.2.9 はポートが 8765 固定で、データ分離には `LOCALAPPDATA` を使用します。上書きインストール前後で既存設定と録音のハッシュを比較してください。音声、文字起こし、個人設定、ローカル検証ログをコミット・アップロードしないでください。
+
+回帰確認: `python -m unittest discover -s tests -v`、`npm.cmd run build`、`npm.cmd run build:windows`。UI は `python scripts/ui-fixture-server.py` を起動後、Electron で `scripts/verify-ui.cjs` と `scripts/verify-prompt-ui.cjs` を順に実行します。同じ fixture を共有するため同時実行しないでください。これはテスト用 Chromium であり、Windows 配布形式は従来の EXE + ブラウザです。
+
 公開 Release は GitHub Actions から自動作成しません。Windows workflow は `master`・`codex/**` への push / `master` 向け pull request と手動実行で候補をビルドし、インストーラーと SHA-256 付きマニフェストを Actions artifact に保存するだけです。
 
 ## 1. 同じソースから両 OS をビルドする

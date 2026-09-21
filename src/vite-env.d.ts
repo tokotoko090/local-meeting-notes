@@ -52,6 +52,8 @@ export type GpuStatusResult = {
 
 export type SettingsResult = {
   ok: boolean;
+  model?: string;
+  transcribe_device?: string;
   output_root?: string;
   default_output_root?: string;
   prompt_template?: string;

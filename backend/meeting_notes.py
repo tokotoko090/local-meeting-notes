@@ -121,16 +121,26 @@ def configure_binary_paths() -> None:
 
 
 def resolve_ffmpeg() -> str | None:
-    configure_binary_paths()
-    candidates = [
-        RESOURCE_ROOT / "vendor" / "ffmpeg.exe",
-        RESOURCE_ROOT / "ffmpeg" / "ffmpeg.exe",
-        Path(sys.executable).resolve().parent / "vendor" / "ffmpeg.exe",
-        Path(sys.executable).resolve().parent / "ffmpeg.exe",
-    ]
+    # Installed builds use an independently validated executable, never a PATH
+    # shim or an old executable extracted from the PyInstaller archive.
+    candidates = [Path(sys.executable).resolve().parent / "vendor" / "ffmpeg.exe"]
+    component_root = Path(os.environ.get("LOCAL_MEETING_NOTES_DATA_ROOT", str(DEFAULT_APP_DATA_ROOT))) / "components" / "ffmpeg"
+    try:
+        metadata = json.loads((component_root / "current.json").read_text(encoding="utf-8"))
+        managed = Path(metadata["path"]).resolve()
+        managed.relative_to(component_root.resolve())
+        if managed.name.lower() == "ffmpeg.exe":
+            candidates.insert(0, managed)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if not IS_FROZEN:
+        candidates.insert(0, RESOURCE_ROOT / "vendor" / "ffmpeg.exe")
     for candidate in candidates:
-        if candidate.exists():
+        if candidate.is_file():
             return str(candidate)
+    if IS_FROZEN:
+        return None
+    configure_binary_paths()
     found = shutil.which("ffmpeg.exe") or shutil.which("ffmpeg")
     return found
 
@@ -318,6 +328,8 @@ def record_device(
     sample_rate = device.sample_rate or SAMPLE_RATE
     wav = create_wave(output_dir / file_name, channels, sample_rate)
     stream = None
+    finished = threading.Event()
+    stop_waiter = None
     try:
         write_log(output_dir, f"opening {file_name} on device {device.index}: {device.name}")
         stream = pa.open(
@@ -328,13 +340,34 @@ def record_device(
             input_device_index=device.index,
             frames_per_buffer=FRAMES_PER_BUFFER,
         )
+        def interrupt_blocking_read() -> None:
+            # Silent WASAPI loopback can wait indefinitely inside read().
+            while not finished.is_set():
+                if stop_event.wait(0.1):
+                    if not finished.is_set():
+                        try:
+                            stream.stop_stream()
+                        except Exception:
+                            pass
+                    return
+
+        stop_waiter = threading.Thread(target=interrupt_blocking_read, daemon=True)
+        stop_waiter.start()
         write_log(output_dir, f"started {file_name} on device {device.index}: {device.name}")
         while not stop_event.is_set():
-            data = stream.read(FRAMES_PER_BUFFER, exception_on_overflow=False)
+            try:
+                data = stream.read(FRAMES_PER_BUFFER, exception_on_overflow=False)
+            except OSError:
+                if stop_event.is_set():
+                    break
+                raise
             wav.writeframes(data)
     except Exception as exc:  # noqa: BLE001
         error_queue.put(f"{file_name}: {exc}")
     finally:
+        finished.set()
+        if stop_waiter is not None:
+            stop_waiter.join()
         if stream is not None:
             if stream.is_active():
                 stream.stop_stream()

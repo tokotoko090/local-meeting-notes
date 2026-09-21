@@ -23,17 +23,17 @@ if ($LASTEXITCODE -ne 0) { throw "Build command failed with exit code $LASTEXITC
 & $python -m pip install -r backend\installer-requirements.txt -r backend\build-requirements.txt
 if ($LASTEXITCODE -ne 0) { throw "Build command failed with exit code $LASTEXITCODE" }
 
-New-Item -ItemType Directory -Force -Path vendor | Out-Null
-$ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-if ($ffmpeg) {
-  Copy-Item -LiteralPath $ffmpeg.Source -Destination "vendor\ffmpeg.exe" -Force
-} else {
-  throw "ffmpeg.exe is required for a self-contained installer."
-}
+$ffmpegArguments = @("scripts/prepare_windows_ffmpeg.py", "--output", "vendor/ffmpeg.exe")
+if (-not $env:CI) { $ffmpegArguments += "--allow-local-cache" }
+& $python @ffmpegArguments
+if ($LASTEXITCODE -ne 0) { throw "Verified standalone ffmpeg preparation failed." }
 
 $workPath = Join-Path "build" ("pyinstaller-" + (Get-Date -Format "yyyyMMddHHmmss"))
 if (Test-Path -LiteralPath "dist-app") {
-  Remove-Item -LiteralPath "dist-app" -Recurse -Force
+  $distPath = (Resolve-Path -LiteralPath "dist-app").Path
+  if ($distPath -ne (Join-Path $root "dist-app")) { throw "Unexpected dist-app target: $distPath" }
+  if ((Get-Item -LiteralPath $distPath).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing to remove a linked dist-app directory." }
+  Remove-Item -LiteralPath $distPath -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path release | Out-Null
 
