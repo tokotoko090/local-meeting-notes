@@ -11,6 +11,7 @@ if (-not $version) {
 Write-Host "Building Local Meeting Notes $version"
 
 npm.cmd run build
+if ($LASTEXITCODE -ne 0) { throw "Build command failed with exit code $LASTEXITCODE" }
 
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
@@ -18,14 +19,16 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 & $python -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "Build command failed with exit code $LASTEXITCODE" }
 & $python -m pip install -r backend\installer-requirements.txt -r backend\build-requirements.txt
+if ($LASTEXITCODE -ne 0) { throw "Build command failed with exit code $LASTEXITCODE" }
 
 New-Item -ItemType Directory -Force -Path vendor | Out-Null
 $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
 if ($ffmpeg) {
   Copy-Item -LiteralPath $ffmpeg.Source -Destination "vendor\ffmpeg.exe" -Force
 } else {
-  Write-Warning "ffmpeg.exe was not found in PATH; the installer will rely on the user's PATH."
+  throw "ffmpeg.exe is required for a self-contained installer."
 }
 
 $workPath = Join-Path "build" ("pyinstaller-" + (Get-Date -Format "yyyyMMddHHmmss"))
@@ -35,6 +38,7 @@ if (Test-Path -LiteralPath "dist-app") {
 New-Item -ItemType Directory -Force -Path release | Out-Null
 
 & $python -m PyInstaller --noconfirm --clean --distpath dist-app --workpath $workPath LocalMeetingNotes.spec
+if ($LASTEXITCODE -ne 0) { throw "Build command failed with exit code $LASTEXITCODE" }
 
 $exePath = Join-Path $root "dist-app\LocalMeetingNotes.exe"
 if (-not (Test-Path -LiteralPath $exePath)) {
@@ -57,6 +61,7 @@ if (-not $makensis) {
 }
 
 & $makensisPath "/DAPP_VERSION=$version" "installer\LocalMeetingNotes.nsi"
+if ($LASTEXITCODE -ne 0) { throw "Build command failed with exit code $LASTEXITCODE" }
 
 $installer = Join-Path $root "release\LocalMeetingNotesSetup-$version.exe"
 if (-not (Test-Path -LiteralPath $installer)) {

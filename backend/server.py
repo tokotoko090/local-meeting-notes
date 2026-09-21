@@ -18,8 +18,16 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import site
+import signal
+import time
+import uuid
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from backend.prompts import DEFAULT_PROMPT_TEMPLATE, TEMPLATE_SNAPSHOT_ENV, atomic_write_text, require_text
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
@@ -29,8 +37,11 @@ WORK_ROOT = (
     if IS_FROZEN
     else ROOT
 )
+if sys.platform == "darwin":
+    WORK_ROOT = Path.home() / "Library" / "Application Support" / "Local Meeting Notes"
+WORK_ROOT = Path(os.environ.get("LOCAL_MEETING_NOTES_DATA_ROOT", str(WORK_ROOT)))
 PYTHON = sys.executable
-SERVER_VERSION = "0.2.9"
+SERVER_VERSION = "0.3.0"
 APP_NAME = "Local Meeting Notes"
 GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -42,6 +53,12 @@ EVENT_LOCK = threading.Lock()
 NEXT_EVENT_ID = 0
 RECORDER: subprocess.Popen[str] | None = None
 TRANSCRIBER: subprocess.Popen[str] | None = None
+PROCESS_LOCK = threading.RLock()
+SERVER: ThreadingHTTPServer | None = None
+SHUTTING_DOWN = False
+RECORDING_ACTIVE = False
+NATIVE_REQUESTS: dict[str, queue.Queue] = {}
+NATIVE_LOCK = threading.Lock()
 LATEST_OUTPUT_DIR: str | None = None
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 LOG_PATH = WORK_ROOT / "server.log"
@@ -70,6 +87,8 @@ def configure_standard_streams() -> None:
 
 
 def default_output_root() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Documents" / "Local Meeting Notes"
     return WORK_ROOT / "output"
 
 
@@ -85,7 +104,7 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(settings: dict[str, Any]) -> None:
-    SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2))
 
 
 def settings_payload() -> dict[str, Any]:
@@ -95,11 +114,20 @@ def settings_payload() -> dict[str, Any]:
         "ok": True,
         "output_root": output_root,
         "default_output_root": str(default_output_root()),
+        "prompt_template": settings.get("prompt_template", DEFAULT_PROMPT_TEMPLATE),
+        "default_prompt_template": DEFAULT_PROMPT_TEMPLATE,
     }
 
 
 def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
     settings = load_settings()
+    if "prompt_template" in payload:
+        if SHUTTING_DOWN or any_process_running():
+            return {"ok": False, "error": "録音・処理・終了中はプロンプト設定を変更できません。"}
+        try:
+            settings["prompt_template"] = require_text(payload["prompt_template"])
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
     if "output_root" in payload:
         output_root = str(payload.get("output_root") or "").strip()
         if output_root:
@@ -128,6 +156,8 @@ def backend_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    if sys.platform == "darwin":
+        env.setdefault("HF_HOME", str(WORK_ROOT / "models"))
     env["LOCAL_MEETING_NOTES_GPU_RUNTIME"] = str(GPU_RUNTIME_ROOT)
     cuda_paths = []
     nvidia_roots = [
@@ -147,7 +177,11 @@ def backend_env() -> dict[str, str]:
 
 
 def emit(payload: dict[str, Any]) -> None:
-    global LATEST_OUTPUT_DIR, NEXT_EVENT_ID
+    global LATEST_OUTPUT_DIR, NEXT_EVENT_ID, RECORDING_ACTIVE
+    if payload.get("event") == "recording_started":
+        RECORDING_ACTIVE = True
+    elif payload.get("event") in {"recording_stopped", "error", "complete", "process_closed"}:
+        RECORDING_ACTIVE = False
     if payload.get("output_dir"):
         LATEST_OUTPUT_DIR = str(payload["output_dir"])
     with EVENT_LOCK:
@@ -177,13 +211,16 @@ def run_device_list() -> dict[str, Any]:
         env=backend_env(),
     )
     payload: dict[str, Any] = {"devices": []}
-    if result.returncode == 0 and result.stdout.strip():
-        payload = json.loads(result.stdout)
+    if result.stdout.strip():
+        try:
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+        except ValueError:
+            pass
     return {
         "ok": result.returncode == 0,
         "output": result.stdout.strip(),
         "devices": payload.get("devices", []),
-        "error": result.stderr.strip(),
+        "error": payload.get("message") or payload.get("error") or result.stderr.strip(),
     }
 
 
@@ -234,6 +271,8 @@ def latest_release_info() -> dict[str, Any]:
 
 
 def check_update() -> dict[str, Any]:
+    if sys.platform == "darwin":
+        return {"ok": True, "supported": False, "current_version": SERVER_VERSION, "update_available": False}
     try:
         info = latest_release_info()
     except urllib.error.HTTPError as exc:
@@ -257,8 +296,13 @@ def check_update() -> dict[str, Any]:
 
 def download_update() -> dict[str, Any]:
     global DOWNLOADED_INSTALLER
+    if sys.platform == "darwin":
+        return {"ok": False, "error": "Mac版の自動更新は未対応です。"}
     if any_process_running():
         return {"ok": False, "error": "Finish the current recording or transcription before updating."}
+
+    # A failed refresh must not leave an older installer eligible to run.
+    DOWNLOADED_INSTALLER = None
     try:
         info = latest_release_info()
     except Exception as exc:  # noqa: BLE001
@@ -282,6 +326,10 @@ def download_update() -> dict[str, Any]:
             with target.open("wb") as handle:
                 shutil.copyfileobj(response, handle)
     except Exception as exc:  # noqa: BLE001
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
         return {"ok": False, "error": f"Could not download installer: {exc}"}
 
     DOWNLOADED_INSTALLER = target
@@ -289,6 +337,8 @@ def download_update() -> dict[str, Any]:
 
 
 def install_update() -> dict[str, Any]:
+    if sys.platform == "darwin":
+        return {"ok": False, "error": "Mac版の自動更新は未対応です。"}
     if any_process_running():
         return {"ok": False, "error": "Finish the current recording or transcription before updating."}
     if not DOWNLOADED_INSTALLER or not DOWNLOADED_INSTALLER.exists():
@@ -312,10 +362,57 @@ def install_update() -> dict[str, Any]:
 
 
 def shutdown_app() -> dict[str, Any]:
-    if any_process_running():
-        return {"ok": False, "error": "録音または文字起こしが終わってから終了してください。"}
-    threading.Timer(0.3, lambda: os._exit(0)).start()
-    return {"ok": True}
+    global SHUTTING_DOWN
+    with PROCESS_LOCK:
+        if SHUTTING_DOWN:
+            return {"ok": True, "waiting": any_process_running()}
+        SHUTTING_DOWN = True
+        if RECORDER and RECORDER.poll() is None and RECORDER.stdin:
+            try:
+                RECORDER.stdin.write("shutdown\n" if sys.platform == "darwin" else "stop\n")
+                RECORDER.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+    def finish() -> None:
+        # Do not terminate inference or a writer in the middle of saving a file.
+        while any_process_running():
+            time.sleep(0.2)
+        time.sleep(0.3)
+        if SERVER:
+            SERVER.shutdown()
+    threading.Thread(target=finish, daemon=True).start()
+    return {"ok": True, "waiting": any_process_running()}
+
+
+def default_transcription_model() -> str:
+    if sys.platform == "darwin":
+        from backend.mlx_transcription import DEFAULT_MODEL
+        return DEFAULT_MODEL
+    return "small"
+
+
+def normalize_transcription_options(model: str, device: str) -> tuple[str, str]:
+    model = model or default_transcription_model()
+    if sys.platform == "darwin":
+        from backend.mlx_transcription import validate_model
+        validate_model(model)
+        return model, "mlx"
+    return model, device or "cpu"
+
+
+def capabilities() -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": True, "platform": sys.platform, "transcribe_devices": ["mlx"] if sys.platform == "darwin" else ["cpu", "auto", "cuda"],
+        "updates": sys.platform == "win32", "cuda_setup": sys.platform == "win32",
+        "models": [{"id": name, "label": name} for name in ("base", "small", "medium")],
+        "default_model": default_transcription_model() if sys.platform == "darwin" else "base",
+    }
+    if sys.platform == "darwin":
+        from backend import macos
+        from backend.mlx_transcription import MODEL_OPTIONS
+        result["models"] = MODEL_OPTIONS
+        result["permissions"] = macos.invoke("permissions")
+    return result
 
 
 def gpu_runtime_paths() -> list[Path]:
@@ -359,6 +456,8 @@ def nvidia_smi_status() -> dict[str, Any]:
 
 
 def gpu_status() -> dict[str, Any]:
+    if sys.platform == "darwin":
+        return {"ok": True, "state": "cpu", "label": "CPUで実行", "message": "MacではCPUでローカル文字起こしを行います。"}
     files = gpu_runtime_files()
     runtime_ready = all(files.values())
     probe = nvidia_smi_status()
@@ -428,6 +527,8 @@ def extract_nvidia_dlls(wheel_path: Path) -> int:
 
 
 def setup_gpu_runtime() -> dict[str, Any]:
+    if sys.platform != "win32":
+        return {"ok": False, "error": "CUDAセットアップはWindows専用です。"}
     if any_process_running():
         return {"ok": False, "state": "setup_failed", "label": "GPU(CUDA)セットアップ失敗", "error": "録音または文字起こしが終わってからGPU(CUDA)セットアップを実行してください。"}
     temp_dir = WORK_ROOT / "gpu-runtime-downloads"
@@ -460,7 +561,13 @@ def stream_process_output(process: subprocess.Popen[str]) -> None:
         except json.JSONDecodeError:
             emit({"event": "log", "message": line.strip()})
     code = process.wait()
+    snapshot = getattr(process, "prompt_template_snapshot", None)
+    if isinstance(snapshot, Path):
+        snapshot.unlink(missing_ok=True)
     emit({"event": "process_closed" if code == 0 else "error", "code": code, "output_dir": LATEST_OUTPUT_DIR})
+    process.stdout.close()
+    if process.stdin:
+        process.stdin.close()
 
 
 def stream_process_error(process: subprocess.Popen[str]) -> None:
@@ -470,18 +577,30 @@ def stream_process_error(process: subprocess.Popen[str]) -> None:
 
 
 def start_backend_process(args: list[str]) -> subprocess.Popen[str]:
-    process = subprocess.Popen(
-        backend_args(*args),
-        cwd=WORK_ROOT,
-        text=True,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        env=backend_env(),
-    )
+    # Each worker gets an immutable snapshot, so later settings never affect it.
+    template = require_text(load_settings().get("prompt_template", DEFAULT_PROMPT_TEMPLATE))
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=WORK_ROOT, prefix="prompt-template-", suffix=".txt", delete=False) as stream:
+        stream.write(template)
+        snapshot = Path(stream.name)
+    env = backend_env()
+    env[TEMPLATE_SNAPSHOT_ENV] = str(snapshot)
+    try:
+        process = subprocess.Popen(
+            backend_args(*args),
+            cwd=WORK_ROOT,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+    except Exception:
+        snapshot.unlink(missing_ok=True)
+        raise
+    process.prompt_template_snapshot = snapshot
     threading.Thread(target=stream_process_output, args=(process,), daemon=True).start()
     threading.Thread(target=stream_process_error, args=(process,), daemon=True).start()
     return process
@@ -509,10 +628,15 @@ def start_recording(
     mic_device_index: int | None = None,
     system_device_index: int | None = None,
     output_root: str = "",
+    mic_device_id: str = "",
 ) -> dict[str, Any]:
-    global RECORDER
-    if any_process_running():
+    global RECORDER, LATEST_OUTPUT_DIR
+    if SHUTTING_DOWN or any_process_running():
         return {"ok": False, "error": "Another recording or transcription process is already running."}
+    try:
+        model, transcribe_device = normalize_transcription_options(model, transcribe_device)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
 
     args = ["record", "--model", model, "--transcribe-device", transcribe_device]
     try:
@@ -522,12 +646,16 @@ def start_recording(
             update_settings({"output_root": str(root)})
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"保存先フォルダを使えませんでした: {exc}"}
-    args.extend(["--output-dir", str(root / datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))])
+    args.extend(["--output-dir", str(root / datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f"))])
+    if mic_device_id:
+        args.extend(["--mic-device-id", mic_device_id])
     if mic_device_index is not None:
         args.extend(["--mic-device-index", str(mic_device_index)])
     if system_device_index is not None:
         args.extend(["--system-device-index", str(system_device_index)])
 
+    LATEST_OUTPUT_DIR = None
+    emit({"event": "recording_starting", "message": "録音の準備中です。権限の確認画面が表示された場合は許可してください。"})
     RECORDER = start_backend_process(args)
     return {"ok": True}
 
@@ -556,8 +684,12 @@ def resolve_output_dir(output_dir: str) -> Path:
 
 def start_transcription(output_dir: str, model: str, transcribe_device: str) -> dict[str, Any]:
     global TRANSCRIBER, LATEST_OUTPUT_DIR
-    if any_process_running():
+    if SHUTTING_DOWN or any_process_running():
         return {"ok": False, "error": "Another recording or transcription process is already running."}
+    try:
+        model, transcribe_device = normalize_transcription_options(model, transcribe_device)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     try:
         path = resolve_output_dir(output_dir)
     except UserFacingValueError as exc:
@@ -569,6 +701,47 @@ def start_transcription(output_dir: str, model: str, transcribe_device: str) -> 
     return {"ok": True, "output_dir": str(path)}
 
 
+def prompt_file(output_dir: str) -> Path:
+    directory = resolve_output_dir(output_dir)
+    target = directory / "chatgpt_prompt.md"
+    if target.is_symlink() or not target.is_file():
+        raise UserFacingValueError("この録音フォルダに編集できるchatgpt_prompt.mdがありません。")
+    return target
+
+
+def read_prompt(output_dir: str) -> dict[str, Any]:
+    if SHUTTING_DOWN or any_process_running():
+        return {"ok": False, "error": "録音・処理・終了中はプロンプトを編集できません。"}
+    try:
+        return {"ok": True, "text": prompt_file(output_dir).read_text(encoding="utf-8")}
+    except (ValueError, OSError, UnicodeError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def copy_text(text: str) -> dict[str, Any]:
+    command = ["/usr/bin/pbcopy"] if sys.platform == "darwin" else ["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value $input"]
+    try:
+        result = subprocess.run(command, input=text, text=True, encoding="utf-8", capture_output=True, check=False)
+        return {"ok": result.returncode == 0, "error": result.stderr.strip()}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def save_prompt(output_dir: str, text: object, copy: bool = False) -> dict[str, Any]:
+    if SHUTTING_DOWN or any_process_running():
+        return {"ok": False, "saved": False, "error": "録音・処理・終了中はプロンプトを編集できません。"}
+    try:
+        value = require_text(text)
+        target = prompt_file(output_dir)
+        atomic_write_text(target, value)
+    except (ValueError, OSError, UnicodeError) as exc:
+        return {"ok": False, "saved": False, "error": str(exc)}
+    if copy:
+        result = copy_text(value)
+        return {**result, "saved": True}
+    return {"ok": True, "saved": True}
+
+
 def copy_prompt(output_dir: str | None = None) -> dict[str, Any]:
     target_dir = output_dir or LATEST_OUTPUT_DIR
     if not target_dir:
@@ -577,19 +750,40 @@ def copy_prompt(output_dir: str | None = None) -> dict[str, Any]:
     if not prompt_path.exists():
         return {"ok": False, "error": "chatgpt_prompt.md has not been generated yet."}
     text = prompt_path.read_text(encoding="utf-8")
-    subprocess.run(["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value $input"], input=text, text=True, check=False)
-    return {"ok": True}
+    return copy_text(text)
 
 
 def open_output(output_dir: str | None = None) -> dict[str, Any]:
     target_dir = output_dir or LATEST_OUTPUT_DIR
     if not target_dir:
         return {"ok": False, "error": "No output folder is available yet."}
-    subprocess.Popen(["explorer", target_dir])
+    subprocess.Popen(["/usr/bin/open" if sys.platform == "darwin" else "explorer", target_dir])
     return {"ok": True}
 
 
 def pick_output_dir(existing_only: bool = True) -> dict[str, Any]:
+    if sys.platform == "darwin":
+        from backend import macos
+        initial = str(load_settings().get("output_root") or default_output_root())
+        if os.environ.get("LOCAL_MEETING_NOTES_MANAGED") == "1":
+            request_id = uuid.uuid4().hex
+            reply: queue.Queue = queue.Queue(maxsize=1)
+            with NATIVE_LOCK:
+                NATIVE_REQUESTS[request_id] = reply
+            try:
+                print(json.dumps({"event": "native_request", "id": request_id, "command": "pick-directory",
+                                  "initial": initial, "create": not existing_only}), flush=True)
+                result = reply.get(timeout=3600)
+            except queue.Empty:
+                result = {"ok": False, "error": "フォルダ選択がタイムアウトしました。"}
+            finally:
+                with NATIVE_LOCK:
+                    NATIVE_REQUESTS.pop(request_id, None)
+        else:
+            result = macos.invoke("pick-directory", "--initial", initial, *([] if existing_only else ["--create"]), timeout=3600)
+        if result.get("ok") and not existing_only:
+            update_settings({"output_root": result["output_dir"]})
+        return result
     env = os.environ.copy()
     settings = load_settings()
     output_root = Path(str(settings.get("output_root") or default_output_root()))
@@ -638,8 +832,21 @@ exit 3
 
 
 class Handler(BaseHTTPRequestHandler):
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        allowed_hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+        allowed_origins = {f"http://{host}" for host in allowed_hosts} | {"http://127.0.0.1:5173", "http://localhost:5173"}
+        origin = self.headers.get("Origin")
+        if self.headers.get("Host") not in allowed_hosts or (origin and origin not in allowed_origins):
+            self.send_error(403, "Local application requests only")
+            return False
+        return True
+
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if self.headers.get("Origin"):
+            self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "content-type")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         super().end_headers()
@@ -668,7 +875,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
-            self.send_json({"ok": True, "server_version": SERVER_VERSION})
+            self.send_json({"ok": True, "server_version": SERVER_VERSION, "pid": os.getpid(), "busy": any_process_running(), "recording": RECORDING_ACTIVE, "shutting_down": SHUTTING_DOWN})
+            return
+        if parsed.path == "/api/capabilities":
+            self.send_json(capabilities())
             return
         if parsed.path == "/api/update/check":
             self.send_json(check_update())
@@ -709,17 +919,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        try:
+            with PROCESS_LOCK:
+                self.handle_post()
+        except (ValueError, OSError, RuntimeError) as exc:
+            self.send_json({"ok": False, "error": str(exc)})
+
+    def handle_post(self) -> None:
         body = read_json_body(self)
         if self.path == "/api/recording/start":
             mic_index = body.get("micDeviceIndex")
             system_index = body.get("systemDeviceIndex")
             self.send_json(
                 start_recording(
-                    str(body.get("model") or "small"),
+                    str(body.get("model") or default_transcription_model()),
                     str(body.get("transcribeDevice") or "cpu"),
                     int(mic_index) if mic_index not in (None, "") else None,
                     int(system_index) if system_index not in (None, "") else None,
                     str(body.get("outputRoot") or ""),
+                    str(body.get("micDeviceId") or ""),
                 )
             )
             return
@@ -730,10 +948,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(
                 start_transcription(
                     str(body.get("outputDir") or ""),
-                    str(body.get("model") or "small"),
+                    str(body.get("model") or default_transcription_model()),
                     str(body.get("transcribeDevice") or "cpu"),
                 )
             )
+            return
+        if self.path == "/api/prompt/read":
+            self.send_json(read_prompt(str(body.get("outputDir") or "")))
+            return
+        if self.path == "/api/prompt/save":
+            self.send_json(save_prompt(str(body.get("outputDir") or ""), body.get("text"), body.get("copy") is True))
             return
         if self.path == "/api/prompt/copy":
             self.send_json(copy_prompt(str(body.get("outputDir") or "") or None))
@@ -770,16 +994,40 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    global SERVER
     configure_standard_streams()
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-        url = "http://127.0.0.1:8765"
+        server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("LOCAL_MEETING_NOTES_PORT", "8765"))), Handler)
+        SERVER = server
+        url = f"http://127.0.0.1:{server.server_port}"
         log(f"{APP_NAME}: {url}")
-        print(f"{APP_NAME}: {url}", flush=True)
+        print(json.dumps({"event": "server_ready", "url": url, "pid": os.getpid()}), flush=True)
+        signal.signal(signal.SIGTERM, lambda *_: shutdown_app())
+        signal.signal(signal.SIGINT, lambda *_: shutdown_app())
+        if os.environ.get("LOCAL_MEETING_NOTES_MANAGED") == "1":
+            def watch_parent() -> None:
+                for line in sys.stdin:
+                    try:
+                        message = json.loads(line)
+                        with NATIVE_LOCK:
+                            reply = NATIVE_REQUESTS.get(message.get("id"))
+                        if reply:
+                            reply.put_nowait(message.get("result", {"ok": False, "canceled": True}))
+                    except (ValueError, queue.Full):
+                        pass
+                with NATIVE_LOCK:
+                    for reply in NATIVE_REQUESTS.values():
+                        try:
+                            reply.put_nowait({"ok": False, "canceled": True})
+                        except queue.Full:
+                            pass
+                shutdown_app()
+            threading.Thread(target=watch_parent, daemon=True).start()
         open_browser_default = "1" if IS_FROZEN else "0"
         if os.environ.get("LOCAL_MEETING_NOTES_OPEN_BROWSER", open_browser_default) == "1":
             threading.Timer(0.5, lambda: webbrowser.open(url)).start()
         server.serve_forever()
+        server.server_close()
     except Exception as exc:  # noqa: BLE001
         log(f"server failed: {exc}")
         raise

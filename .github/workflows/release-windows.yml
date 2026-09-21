@@ -1,21 +1,28 @@
-name: Release Windows Installer
+name: Build Windows release candidate
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - master
+      - "codex/**"
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 
     steps:
-      - name: Check out repository
+      - name: Check out source commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -33,26 +40,36 @@ jobs:
         run: |
           choco install ffmpeg nsis -y --no-progress
 
-      - name: Install frontend dependencies
+      - name: Install dependencies and build
         shell: powershell
-        run: npm ci
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build installer
+      - name: Run tests
         shell: powershell
-        run: npm run build:windows
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload build artifact
+      - name: Create release manifest
+        shell: powershell
+        run: |
+          $version = (node -p "require('./package.json').version").Trim()
+          python scripts/release_manifest.py create `
+            --artifact "release/LocalMeetingNotesSetup-$version.exe" `
+            --platform windows-x64 `
+            --source-commit $env:SOURCE_COMMIT `
+            --output "release/windows-manifest.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload candidate (never publishes a Release)
         uses: actions/upload-artifact@v4
         with:
-          name: LocalMeetingNotesSetup
-          path: release/LocalMeetingNotesSetup-*.exe
-
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: powershell
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $installer = Get-ChildItem -Path release -Filter "LocalMeetingNotesSetup-*.exe" | Select-Object -First 1
-          if (-not $installer) { throw "Installer was not found." }
-          gh release create "${env:GITHUB_REF_NAME}" $installer.FullName --title "${env:GITHUB_REF_NAME}" --generate-notes
+          name: LocalMeetingNotes-windows-${{ env.SOURCE_COMMIT }}
+          if-no-files-found: error
+          path: |
+            release/LocalMeetingNotesSetup-*.exe
+            release/windows-manifest.json

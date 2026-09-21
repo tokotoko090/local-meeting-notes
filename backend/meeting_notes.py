@@ -19,7 +19,10 @@ from pathlib import Path
 import site
 from typing import Any
 
-APP_VERSION = "0.2.9"
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+APP_VERSION = "0.3.0"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 DEFAULT_APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LocalMeetingNotes"
@@ -403,6 +406,8 @@ def has_audio_frames(path: Path) -> bool:
 
 
 def run_record(args: argparse.Namespace) -> int:
+    if sys.platform == "darwin":
+        return run_record_macos(args)
     configure_binary_paths()
     if resolve_ffmpeg() is None:
         raise UserFacingError("ffmpeg was not found in PATH. Install ffmpeg before recording.")
@@ -516,8 +521,115 @@ def run_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_record_macos(args: argparse.Namespace) -> int:
+    from backend import macos
+    from backend.mlx_transcription import validate_model
+
+    validate_model(args.model)
+    output_dir = Path(args.output_dir) if args.output_dir else timestamp_dir(Path.home() / "Documents" / "Local Meeting Notes")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    devices = macos.invoke("list-devices")
+    if not devices.get("ok"):
+        raise UserFacingError(str(devices.get("error")))
+    mic_id = getattr(args, "mic_device_id", None)
+    if not mic_id and args.mic_device_index is not None:
+        selected = next((d for d in devices["devices"] if d["kind"] == "mic" and d["index"] == args.mic_device_index), None)
+        if selected is None:
+            raise UserFacingError("選択したマイクが見つかりません。デバイスを再読み込みしてください。")
+        mic_id = selected["id"]
+    command = macos.command("record", str(output_dir.resolve()), *([mic_id] if mic_id else []))
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, encoding="utf-8", bufsize=1)
+    shutting_down = threading.Event()
+    write_lock = threading.Lock()
+
+    def stop(message: str = "stop") -> None:
+        if message == "shutdown":
+            shutting_down.set()
+        with write_lock:
+            if child.poll() is None and child.stdin:
+                try:
+                    child.stdin.write("stop\n")
+                    child.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+
+    def relay_stdin() -> None:
+        for line in sys.stdin:
+            message = line.strip().lower()
+            if message in {"stop", "quit", "exit", "shutdown"}:
+                stop("shutdown" if message != "stop" else "stop")
+        stop("shutdown")
+
+    threading.Thread(target=relay_stdin, daemon=True).start()
+    signal.signal(signal.SIGTERM, lambda *_: stop("shutdown"))
+    signal.signal(signal.SIGINT, lambda *_: stop("shutdown"))
+    def log_stderr() -> None:
+        for line in child.stderr:
+            write_log(output_dir, line.rstrip())
+        child.stderr.close()
+    error_reader = threading.Thread(target=log_stderr, daemon=True)
+    error_reader.start()
+    metadata: dict[str, Any] = {"app_version": APP_VERSION, "whisper_model": args.model, "platform": "darwin"}
+    timer = None
+    capture_error = None
+    try:
+        for line in child.stdout:
+            payload = json.loads(line)
+            event = payload.pop("event", "status")
+            write_log(output_dir, json.dumps({"event": event, **payload}, ensure_ascii=False))
+            if event == "recording_started":
+                metadata.update({"recording_started_at": payload.get("recording_started_at"),
+                                 "mic_device_name": payload.get("mic_device"), "system_device_name": payload.get("system_device"),
+                                 "clock": payload.get("clock")})
+                if args.duration is not None:
+                    timer = threading.Timer(args.duration, stop)
+                    timer.start()
+            elif event == "recording_stopped":
+                metadata.update({"recording_stopped_at": now_iso(), **payload})
+            elif event == "error":
+                capture_error = payload.get("message") or payload.get("error")
+                metadata["error"] = capture_error
+            (output_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            emit(event, **payload)
+        code = child.wait()
+    finally:
+        if timer:
+            timer.cancel()
+        if child.poll() is None:
+            stop("shutdown")
+            try:
+                child.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        if child.stdin:
+            child.stdin.close()
+        child.stdout.close()
+        error_reader.join(timeout=2)
+    if code or capture_error:
+        raise UserFacingError(str(capture_error or "Macの録音に失敗しました。録音済みのファイルは保存先を確認してください。"))
+    if not args.skip_transcribe and not shutting_down.is_set():
+        transcribe_pair(output_dir, args.model, "mlx")
+        generate_transcript(output_dir)
+        generate_prompt(output_dir)
+    emit("complete", output_dir=str(output_dir.resolve()), message="録音を保存しました。" if shutting_down.is_set() else "処理が完了しました。")
+    return 0
+
+
 def transcribe_audio(audio_path: Path, model_name: str, transcribe_device: str = "cpu") -> dict[str, Any]:
     global CUDA_DISABLED
+    if sys.platform == "darwin":
+        from backend import mlx_transcription
+        mlx_transcription.validate_model(model_name)
+        if not has_audio_frames(audio_path):
+            return {"source_file": audio_path.name, "language": "ja", "language_probability": None,
+                    "runtime_device": "mlx", "compute_type": "float16", "segments": []}
+        result = mlx_transcription.transcribe(
+            prepare_audio_for_whisper(audio_path), model_name,
+            status=lambda message: emit("status", message=message),
+        )
+        return {"source_file": audio_path.name, **result}
     if not has_audio_frames(audio_path):
         return {
             "source_file": audio_path.name,
@@ -573,6 +685,8 @@ def transcribe_audio(audio_path: Path, model_name: str, transcribe_device: str =
 
 
 def whisper_runtime_attempts(transcribe_device: str) -> list[tuple[str, str]]:
+    if sys.platform == "darwin":
+        raise UserFacingError("Macの文字起こしはMLX専用です。")
     if CUDA_DISABLED:
         return [("cpu", "int8")]
     if transcribe_device == "cuda":
@@ -622,12 +736,18 @@ def prepare_audio_for_whisper(audio_path: Path) -> Path:
 
 
 def transcribe_pair(output_dir: Path, model_name: str, transcribe_device: str = "cpu") -> None:
+    if sys.platform == "darwin":
+        from backend.mlx_transcription import validate_model
+        validate_model(model_name)
+        transcribe_device = "mlx"
     emit("transcription_started", model=model_name, transcribe_device=transcribe_device)
+    failures = []
     for source, target in [("mic.wav", "mic_transcript.json"), ("system.wav", "system_transcript.json")]:
         emit("transcribing", file=source)
         try:
             result = transcribe_audio(output_dir / source, model_name, transcribe_device)
         except Exception as exc:  # noqa: BLE001
+            failures.append(f"{source}: {exc}")
             write_log(output_dir, f"warning transcription failed for {source}: {exc}")
             emit("warning", message=f"Transcription failed for {source}: {exc}")
             result = {
@@ -637,7 +757,11 @@ def transcribe_pair(output_dir: Path, model_name: str, transcribe_device: str = 
                 "segments": [],
                 "error": str(exc),
             }
+            if sys.platform == "darwin":
+                result.update(language_probability=None, runtime_device="mlx", compute_type="float16")
         (output_dir / target).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if failures:
+        raise UserFacingError("文字起こしに失敗しました。音声は保存されています。既存フォルダから再実行できます。 " + "; ".join(failures))
     emit("transcription_complete")
 
 
@@ -690,45 +814,21 @@ def generate_transcript(output_dir: Path) -> Path:
 def generate_prompt(output_dir: Path) -> Path:
     transcript_path = output_dir / "transcript.md"
     transcript = transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
-    prompt = f"""# 依頼
-
-以下は会議の文字起こしです。mic は自分の発言、system はPCから聞こえた相手側や共有音声です。この文字起こしをもとに、議事録を作成してください。
-
-# 出力形式
-
-## 会議概要
-*
-
-## 決定事項
-*
-
-## 議論内容
-*
-
-## ToDo
-
-| 担当 | 内容 | 期限 |
-| -- | -- | -- |
-
-## 保留事項
-*
-
-## 次回確認事項
-*
-
-## 重要発言
-*
-
-## 文字起こし全文
-
-{transcript}
-"""
+    from backend.prompts import render_prompt, worker_template
+    prompt = render_prompt(worker_template(), transcript)
     path = output_dir / "chatgpt_prompt.md"
     path.write_text(prompt, encoding="utf-8")
     emit("prompt_generated", file=str(path.resolve()))
     return path
 
 def run_list_devices(_args: argparse.Namespace) -> int:
+    if sys.platform == "darwin":
+        from backend import macos
+        payload = macos.invoke("list-devices")
+        if not payload.get("ok"):
+            raise UserFacingError(str(payload.get("error")))
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+        return 0
     devices = read_devices()
     if getattr(_args, "json", False):
         print(
@@ -772,6 +872,9 @@ def run_generate(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from backend.mlx_transcription import DEFAULT_MODEL
+    default_model = DEFAULT_MODEL if sys.platform == "darwin" else "small"
+    default_device = "mlx" if sys.platform == "darwin" else "cpu"
     parser = argparse.ArgumentParser(description="Local Meeting Notes backend")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -783,9 +886,10 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--duration", type=int, default=None, help="Stop automatically after this many seconds.")
     record.add_argument("--output-dir", default=None)
     record.add_argument("--mic-device-index", type=int, default=None)
+    record.add_argument("--mic-device-id", default=None)
     record.add_argument("--system-device-index", type=int, default=None)
-    record.add_argument("--model", default="small")
-    record.add_argument("--transcribe-device", choices=["cpu", "auto", "cuda"], default="cpu")
+    record.add_argument("--model", default=default_model)
+    record.add_argument("--transcribe-device", choices=["cpu", "auto", "cuda", "mlx"] if sys.platform == "darwin" else ["cpu", "auto", "cuda"], default=default_device)
     record.add_argument("--skip-transcribe", action="store_true")
     record.set_defaults(func=run_record)
 
@@ -798,9 +902,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate = subparsers.add_parser("generate")
     generate.add_argument("output_dir")
-    generate.add_argument("--model", default="small")
+    generate.add_argument("--model", default=default_model)
     generate.add_argument("--transcribe", action="store_true")
-    generate.add_argument("--transcribe-device", choices=["cpu", "auto", "cuda"], default="cpu")
+    generate.add_argument("--transcribe-device", choices=["cpu", "auto", "cuda", "mlx"] if sys.platform == "darwin" else ["cpu", "auto", "cuda"], default=default_device)
     generate.set_defaults(func=run_generate)
     return parser
 
@@ -814,6 +918,9 @@ def main() -> int:
     except UserFacingError as exc:
         emit("error", message=str(exc))
         return 2
+    except Exception as exc:
+        emit("error", message=f"処理に失敗しました: {exc}")
+        return 1
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ export type BackendEvent = {
 };
 
 export type AudioDevice = {
+  id?: string;
+  is_default?: boolean;
   index: number;
   name: string;
   channels: number;
@@ -52,22 +54,20 @@ export type SettingsResult = {
   ok: boolean;
   output_root?: string;
   default_output_root?: string;
+  prompt_template?: string;
+  default_prompt_template?: string;
   error?: string;
 };
 
-declare global {
-  interface Window {
-    meetingNotes: {
-      listDevices: () => Promise<{ ok: boolean; output: string; devices: AudioDevice[]; error?: string }>;
-      startRecording: (options: { model: string; transcribeDevice: string; micDeviceIndex?: number | ""; systemDeviceIndex?: number | ""; outputRoot?: string }) => Promise<{ ok: boolean; error?: string }>;
-      stopRecording: () => Promise<{ ok: boolean; error?: string }>;
-      transcribeExisting?: (options: { outputDir: string; model: string; transcribeDevice: string }) => Promise<{ ok: boolean; output_dir?: string; error?: string }>;
-      pickOutputFolder?: () => Promise<{ ok: boolean; output_dir?: string; canceled?: boolean; error?: string }>;
-      pickRecordingOutputRoot?: () => Promise<{ ok: boolean; output_dir?: string; canceled?: boolean; error?: string }>;
-      openOutputFolder: (outputDir?: string) => Promise<{ ok: boolean; error?: string }>;
-      copyPrompt: (outputDir?: string) => Promise<{ ok: boolean; error?: string }>;
-      shutdown?: () => Promise<{ ok: boolean; error?: string }>;
-      onBackendEvent: (callback: (payload: BackendEvent) => void) => () => void;
-    };
-  }
-}
+export type Capabilities = {
+  ok: boolean;
+  platform: string;
+  updates: boolean;
+  cuda_setup: boolean;
+  transcribe_devices: string[];
+  models: { id: string; label: string }[];
+  default_model: string;
+  permissions?: { microphone?: string; system_audio?: string; error?: string };
+};
+
+export type PromptResult = { ok: boolean; text?: string; saved?: boolean; error?: string };
