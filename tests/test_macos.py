@@ -73,7 +73,7 @@ class MacTests(unittest.TestCase):
             events = [json.loads(line)['event'] for line in output.getvalue().splitlines()]
             self.assertNotIn('transcription_complete', events)
             self.assertNotIn('complete', events)
-            self.assertIn('model download failed', (self.root / 'mic_transcript.json').read_text())
+            self.assertIn('model download failed', (self.root / 'mic_transcript.json').read_text(encoding="utf-8"))
 
     def test_transcript_merges_aligned_timestamps(self):
         for name, segments in [('mic', [{'start': 2, 'text': '私の発言'}]), ('system', [{'start': 1, 'text': '相手の発言'}])]:
@@ -81,9 +81,9 @@ class MacTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             notes.generate_transcript(self.root)
             notes.generate_prompt(self.root)
-        text = (self.root / 'transcript.md').read_text()
+        text = (self.root / 'transcript.md').read_text(encoding="utf-8")
         self.assertLess(text.index('[system] 相手の発言'), text.index('[mic] 私の発言'))
-        self.assertIn(text, (self.root / 'chatgpt_prompt.md').read_text())
+        self.assertIn(text, (self.root / 'chatgpt_prompt.md').read_text(encoding="utf-8"))
 
     def test_missing_helper_is_actionable(self):
         with patch.dict(os.environ, {'LOCAL_MEETING_NOTES_AUDIO_HELPER': str(self.root / 'missing')}):

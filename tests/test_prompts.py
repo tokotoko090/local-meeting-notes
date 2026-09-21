@@ -75,8 +75,8 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(result['prompt_template'], template)
         self.assertEqual(result['default_prompt_template'], prompts.DEFAULT_PROMPT_TEMPLATE)
-        self.assertEqual(json.loads(server.SETTINGS_PATH.read_text())['prompt_template'], template)
-        self.assertEqual(self.prompt.read_text(), 'previous prompt')
+        self.assertEqual(json.loads(server.SETTINGS_PATH.read_text(encoding="utf-8"))['prompt_template'], template)
+        self.assertEqual(self.prompt.read_text(encoding="utf-8"), 'previous prompt')
         server.update_settings({'output_root': ''})
         self.assertEqual(server.settings_payload()['prompt_template'], template)
 
@@ -115,8 +115,8 @@ class PromptTests(unittest.TestCase):
         (self.recording / 'transcript.md').write_text('keep transcript')
         value = '  編集内容\n\n'
         self.assertEqual(server.save_prompt(str(self.recording), value), {'ok': True, 'saved': True})
-        self.assertEqual(self.prompt.read_text(), value)
-        self.assertEqual((self.recording / 'transcript.md').read_text(), 'keep transcript')
+        self.assertEqual(self.prompt.read_text(encoding="utf-8"), value)
+        self.assertEqual((self.recording / 'transcript.md').read_text(encoding="utf-8"), 'keep transcript')
         self.assertEqual((self.recording / 'mic.wav').read_bytes(), b'fixture')
 
     def test_save_failure_preserves_previous_and_never_copies(self):
@@ -124,7 +124,7 @@ class PromptTests(unittest.TestCase):
             result = server.save_prompt(str(self.recording), 'new', copy=True)
         self.assertFalse(result['ok'])
         self.assertFalse(result['saved'])
-        self.assertEqual(self.prompt.read_text(), 'previous prompt')
+        self.assertEqual(self.prompt.read_text(encoding="utf-8"), 'previous prompt')
         self.assertEqual(list(self.recording.glob('.*.tmp')), [])
         copy.assert_not_called()
 
@@ -133,7 +133,7 @@ class PromptTests(unittest.TestCase):
             result = server.save_prompt(str(self.recording), 'saved content', copy=True)
         self.assertFalse(result['ok'])
         self.assertTrue(result['saved'])
-        self.assertEqual(self.prompt.read_text(), 'saved content')
+        self.assertEqual(self.prompt.read_text(encoding="utf-8"), 'saved content')
         copy.assert_called_once_with('saved content')
 
     def test_blank_and_missing_prompt_rejected(self):
@@ -150,7 +150,7 @@ class PromptTests(unittest.TestCase):
         self.prompt.symlink_to(outside)
         self.assertFalse(server.save_prompt(str(self.recording), 'changed')['saved'])
         self.assertFalse(server.read_prompt(str(self.recording))['ok'])
-        self.assertEqual(outside.read_text(), 'protected')
+        self.assertEqual(outside.read_text(encoding="utf-8"), 'protected')
 
     def test_busy_and_shutdown_reject_edit_operations(self):
         for flag in ['busy', 'shutdown']:
@@ -158,7 +158,7 @@ class PromptTests(unittest.TestCase):
                 self.assertFalse(server.read_prompt(str(self.recording))['ok'])
                 self.assertFalse(server.save_prompt(str(self.recording), 'new')['saved'])
                 self.assertFalse(server.update_settings({'prompt_template': 'new'})['ok'])
-        self.assertEqual(self.prompt.read_text(), 'previous prompt')
+        self.assertEqual(self.prompt.read_text(encoding="utf-8"), 'previous prompt')
         self.assertFalse(server.SETTINGS_PATH.exists())
 
 
