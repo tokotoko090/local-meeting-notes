@@ -24,7 +24,7 @@ class WindowsFfmpegTests(unittest.TestCase):
                  patch.object(meeting_notes.sys, 'executable', str(vendor.parent / 'LocalMeetingNotes.exe')), \
                  patch.dict(os.environ, {'LOCAL_MEETING_NOTES_DATA_ROOT': str(root / 'data')}), \
                  patch.object(meeting_notes.shutil, 'which') as which:
-                self.assertEqual(meeting_notes.resolve_ffmpeg(), str(executable))
+                self.assertEqual(meeting_notes.resolve_ffmpeg(), str(executable.resolve()))
                 executable.unlink()
                 self.assertIsNone(meeting_notes.resolve_ffmpeg())
                 which.assert_not_called()
@@ -42,7 +42,7 @@ class WindowsFfmpegTests(unittest.TestCase):
             with patch.object(meeting_notes, 'IS_FROZEN', True), \
                  patch.object(meeting_notes.sys, 'executable', str(root / 'app.exe')), \
                  patch.dict(os.environ, {'LOCAL_MEETING_NOTES_DATA_ROOT': str(root)}):
-                self.assertEqual(meeting_notes.resolve_ffmpeg(), str(executable))
+                self.assertEqual(meeting_notes.resolve_ffmpeg(), str(executable.resolve()))
                 outside = root / 'ffmpeg.exe'
                 outside.touch()
                 marker.write_text(json.dumps({'path': str(outside)}), encoding='utf-8')

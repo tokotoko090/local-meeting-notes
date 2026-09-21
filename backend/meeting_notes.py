@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import math
+from array import array
 import json
 import os
 import queue
@@ -181,8 +183,12 @@ def device_from_info(info: dict[str, Any]) -> AudioDevice:
     )
 
 
+EVENT_WRITE_LOCK = threading.Lock()
+
+
 def emit(event: str, **payload: Any) -> None:
-    print(json.dumps({"event": event, **payload}, ensure_ascii=False), flush=True)
+    with EVENT_WRITE_LOCK:
+        print(json.dumps({"event": event, **payload}, ensure_ascii=False), flush=True)
 
 
 def now_iso() -> str:
@@ -314,24 +320,38 @@ def create_wave(path: Path, channels: int, sample_rate: int) -> wave.Wave_write:
     return wav
 
 
+def measure_audio(data: bytes) -> dict[str, Any]:
+    samples = array("h")
+    samples.frombytes(data)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    peak = max((abs(int(sample)) for sample in samples), default=0)
+    rms = math.sqrt(sum(int(sample) ** 2 for sample in samples) / len(samples)) if samples else 0
+    db = lambda value: round(max(-60.0, 20 * math.log10(value / 32768)), 2) if value else -60.0
+    return {"rms_dbfs": db(rms), "peak_dbfs": db(peak), "clipping": db(peak) >= -1.0}
+
+
 def record_device(
     *,
     stop_event: threading.Event,
     error_queue: queue.Queue[str],
-    output_dir: Path,
+    output_dir: Path | None,
     file_name: str,
     device: AudioDevice,
+    source: str = "mic",
 ) -> None:
     pyaudio = import_audio()
     pa = pyaudio.PyAudio()
     channels = max(1, device.channels)
     sample_rate = device.sample_rate or SAMPLE_RATE
-    wav = create_wave(output_dir / file_name, channels, sample_rate)
+    wav = create_wave(output_dir / file_name, channels, sample_rate) if output_dir is not None else None
+    last_level_emit = 0.0
     stream = None
     finished = threading.Event()
     stop_waiter = None
     try:
-        write_log(output_dir, f"opening {file_name} on device {device.index}: {device.name}")
+        if output_dir is not None:
+            write_log(output_dir, f"opening {file_name} on device {device.index}: {device.name}")
         stream = pa.open(
             format=pyaudio.paInt16,
             channels=channels,
@@ -353,7 +373,8 @@ def record_device(
 
         stop_waiter = threading.Thread(target=interrupt_blocking_read, daemon=True)
         stop_waiter.start()
-        write_log(output_dir, f"started {file_name} on device {device.index}: {device.name}")
+        if output_dir is not None:
+            write_log(output_dir, f"started {file_name} on device {device.index}: {device.name}")
         while not stop_event.is_set():
             try:
                 data = stream.read(FRAMES_PER_BUFFER, exception_on_overflow=False)
@@ -361,7 +382,12 @@ def record_device(
                 if stop_event.is_set():
                     break
                 raise
-            wav.writeframes(data)
+            if wav is not None:
+                wav.writeframes(data)
+            now = time.monotonic()
+            if now - last_level_emit >= 0.1:
+                emit("audio_level", source=source, active=True, **measure_audio(data))
+                last_level_emit = now
     except Exception as exc:  # noqa: BLE001
         error_queue.put(f"{file_name}: {exc}")
     finally:
@@ -372,16 +398,28 @@ def record_device(
             if stream.is_active():
                 stream.stop_stream()
             stream.close()
-        wav.close()
+        if wav is not None:
+            wav.close()
+        emit("audio_level", source=source, rms_dbfs=-60.0, peak_dbfs=-60.0, clipping=False, active=False)
         pa.terminate()
-        write_log(output_dir, f"stopped {file_name}")
+        if output_dir is not None:
+            write_log(output_dir, f"stopped {file_name}")
 
 
 def run_record_one(args: argparse.Namespace) -> int:
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.monitor_only and sys.platform != "win32":
+        raise UserFacingError("Audio monitoring is Windows-only.")
+    output_dir = None if args.monitor_only else Path(args.output_dir)
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
     devices = read_devices()
-    device = next((candidate for candidate in devices if candidate.index == args.device_index), None)
+    if args.monitor_only:
+        if args.source not in {"mic", "system"}:
+            raise UserFacingError("Audio monitoring requires a mic or system source.")
+        chooser = choose_microphone if args.source == "mic" else choose_loopback
+        device = chooser(devices, args.device_index)
+    else:
+        device = next((candidate for candidate in devices if candidate.index == args.device_index), None)
     if device is None:
         raise UserFacingError(f"Device index {args.device_index} was not found.")
 
@@ -393,6 +431,7 @@ def run_record_one(args: argparse.Namespace) -> int:
             if line.strip().lower() in {"stop", "quit", "exit"}:
                 stop_event.set()
                 return
+        stop_event.set()
 
     threading.Thread(target=stdin_stop, daemon=True).start()
     if args.duration is not None:
@@ -404,10 +443,12 @@ def run_record_one(args: argparse.Namespace) -> int:
         output_dir=output_dir,
         file_name=args.file_name,
         device=device,
+        source=args.source or Path(args.file_name).stem,
     )
     if not errors.empty():
         raise UserFacingError(errors.get())
-    emit("record_one_complete", file=args.file_name)
+    if not args.monitor_only:
+        emit("record_one_complete", file=args.file_name)
     return 0
 
 
@@ -476,30 +517,62 @@ def run_record(args: argparse.Namespace) -> int:
         ("system.wav", system_device.index),
     ]
     children: list[tuple[str, subprocess.Popen[str]]] = []
-    for file_name, device_index in child_specs:
-        child_args = [
-            *backend_command_args(
-            "record-one",
-            "--output-dir",
-            str(output_dir),
-            "--file-name",
-            file_name,
-            "--device-index",
-            str(device_index),
+    readers: list[threading.Thread] = []
+    def drain_child(child, file_name, stream_name):
+        stream = getattr(child, stream_name)
+        try:
+            for line in stream:
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    payload = {}
+                if payload.get("event") == "audio_level":
+                    emit("audio_level", **{key: value for key, value in payload.items() if key != "event"})
+                else:
+                    write_log(output_dir, f"{file_name} {stream_name} {line.strip()}")
+        finally:
+            stream.close()
+
+    try:
+        for file_name, device_index in child_specs:
+            child_args = [
+                *backend_command_args(
+                "record-one",
+                "--output-dir",
+                str(output_dir),
+                "--file-name",
+                file_name,
+                "--device-index",
+                str(device_index),
+                )
+            ]
+            child = subprocess.Popen(
+                child_args,
+                cwd=Path.cwd(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=child_env,
             )
-        ]
-        child = subprocess.Popen(
-            child_args,
-            cwd=Path.cwd(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=child_env,
-        )
-        children.append((file_name, child))
+            children.append((file_name, child))
+            for stream_name in ("stdout", "stderr"):
+                reader = threading.Thread(target=drain_child, args=(child, file_name, stream_name), daemon=True)
+                readers.append(reader)
+                reader.start()
+
+    except Exception:
+        for _, child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+            if child.stdin:
+                child.stdin.close()
+        for reader in readers:
+            reader.join(timeout=5)
+        raise
 
     if args.duration is not None:
         time.sleep(args.duration)
@@ -508,23 +581,27 @@ def run_record(args: argparse.Namespace) -> int:
 
     for _file_name, child in children:
         if child.stdin is not None and child.poll() is None:
-            child.stdin.write("stop\n")
-            child.stdin.flush()
+            try:
+                child.stdin.write("stop\n")
+                child.stdin.flush()
+            except (OSError, ValueError):
+                pass
 
     captured_errors: list[str] = []
     for file_name, child in children:
         try:
-            stdout, stderr = child.communicate(timeout=12)
+            child.wait(timeout=12)
         except subprocess.TimeoutExpired:
             child.kill()
-            stdout, stderr = child.communicate(timeout=5)
+            child.wait(timeout=5)
             captured_errors.append(f"{file_name}: timed out while stopping")
-        for line in stdout.splitlines():
-            write_log(output_dir, f"{file_name} stdout {line}")
-        for line in stderr.splitlines():
-            write_log(output_dir, f"{file_name} stderr {line}")
+        if child.stdin:
+            child.stdin.close()
         if child.returncode != 0:
             captured_errors.append(f"{file_name}: recorder exited with code {child.returncode}")
+
+    for reader in readers:
+        reader.join(timeout=5)
 
     stopped = now_iso()
     duration_seconds = round(time.monotonic() - started_monotonic, 2)
@@ -650,7 +727,7 @@ def run_record_macos(args: argparse.Namespace) -> int:
     return 0
 
 
-def transcribe_audio(audio_path: Path, model_name: str, transcribe_device: str = "cpu") -> dict[str, Any]:
+def transcribe_audio(audio_path: Path, model_name: str, transcribe_device: str = "auto", session: Any = None) -> dict[str, Any]:
     global CUDA_DISABLED
     if sys.platform == "darwin":
         from backend import mlx_transcription
@@ -671,18 +748,18 @@ def transcribe_audio(audio_path: Path, model_name: str, transcribe_device: str =
             "segments": [],
         }
     configure_cuda_dll_paths()
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:
-        raise UserFacingError(
-            "faster-whisper is not installed. Run: python -m pip install -r backend\\requirements.txt"
-        ) from exc
+    from backend.windows_transcription import WindowsTranscriptionSession, ModelDownloadError
+    if session is None:
+        with WindowsTranscriptionSession() as single_audio_session:
+            return transcribe_audio(audio_path, model_name, transcribe_device, single_audio_session)
 
     whisper_audio_path = prepare_audio_for_whisper(audio_path)
     last_error: Exception | None = None
     for device, compute_type in whisper_runtime_attempts(transcribe_device):
         try:
-            model = WhisperModel(model_name, device=device, compute_type=compute_type)
+            model = session.get_model(model_name, device, compute_type,
+                status=lambda message: emit("status", message=message))
+            emit("transcribing", file=audio_path.name)
             segments, info = model.transcribe(
                 str(whisper_audio_path),
                 language="ja",
@@ -697,6 +774,8 @@ def transcribe_audio(audio_path: Path, model_name: str, transcribe_device: str =
             ]
             selected_runtime = (device, compute_type)
             break
+        except ModelDownloadError:
+            raise
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if device == "cuda":
@@ -768,7 +847,14 @@ def prepare_audio_for_whisper(audio_path: Path) -> Path:
     return prepared_path
 
 
-def transcribe_pair(output_dir: Path, model_name: str, transcribe_device: str = "cpu") -> None:
+def transcribe_pair(output_dir: Path, model_name: str, transcribe_device: str = "auto") -> None:
+    from backend.windows_transcription import WindowsTranscriptionSession
+    # One process/job owns the model; mic and system share its weights.
+    with WindowsTranscriptionSession() as session:
+        _transcribe_pair(output_dir, model_name, transcribe_device, session)
+
+
+def _transcribe_pair(output_dir: Path, model_name: str, transcribe_device: str, session: Any) -> None:
     if sys.platform == "darwin":
         from backend.mlx_transcription import validate_model
         validate_model(model_name)
@@ -778,7 +864,7 @@ def transcribe_pair(output_dir: Path, model_name: str, transcribe_device: str = 
     for source, target in [("mic.wav", "mic_transcript.json"), ("system.wav", "system_transcript.json")]:
         emit("transcribing", file=source)
         try:
-            result = transcribe_audio(output_dir / source, model_name, transcribe_device)
+            result = transcribe_audio(output_dir / source, model_name, transcribe_device, session)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{source}: {exc}")
             write_log(output_dir, f"warning transcription failed for {source}: {exc}")
@@ -906,8 +992,9 @@ def run_generate(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     from backend.mlx_transcription import DEFAULT_MODEL
-    default_model = DEFAULT_MODEL if sys.platform == "darwin" else "small"
-    default_device = "mlx" if sys.platform == "darwin" else "cpu"
+    from backend.windows_transcription import DEFAULT_MODEL as WINDOWS_MODEL, DEFAULT_DEVICE
+    default_model = DEFAULT_MODEL if sys.platform == "darwin" else WINDOWS_MODEL
+    default_device = "mlx" if sys.platform == "darwin" else DEFAULT_DEVICE
     parser = argparse.ArgumentParser(description="Local Meeting Notes backend")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -927,9 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     record.set_defaults(func=run_record)
 
     record_one = subparsers.add_parser("record-one")
-    record_one.add_argument("--output-dir", required=True)
-    record_one.add_argument("--file-name", required=True)
-    record_one.add_argument("--device-index", type=int, required=True)
+    record_one.add_argument("--output-dir")
+    record_one.add_argument("--monitor-only", action="store_true")
+    record_one.add_argument("--source", choices=["mic", "system"])
+    record_one.add_argument("--file-name", default="monitor.wav")
+    record_one.add_argument("--device-index", type=int)
     record_one.add_argument("--duration", type=int, default=None)
     record_one.set_defaults(func=run_record_one)
 

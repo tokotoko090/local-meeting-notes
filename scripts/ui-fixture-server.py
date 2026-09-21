@@ -13,7 +13,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENARIOS = ('idle', 'starting', 'recording', 'processing', 'complete', 'error', 'closing', 'loading', 'empty', 'long', 'windows', 'prompt_long', 'prompt_read_error', 'prompt_save_error', 'settings_error')
+SCENARIOS = ('idle', 'starting', 'recording', 'processing', 'complete', 'error', 'closing', 'loading', 'empty', 'long', 'windows', 'windows_saved', 'prompt_long', 'prompt_read_error', 'prompt_save_error', 'settings_error')
 MODELS = [('base', '軽量・速度優先'), ('small', '速度と精度のバランス'), ('medium', '精度重視'), ('large-v3', '高精度・処理負荷大'), ('large-v3-turbo', '高精度と速度の両立（標準）')]
 DEFAULT_TEMPLATE = '以下の文字起こしから日本語の議事録を作成してください。\n決定事項と担当者ごとの次のアクションを整理してください。'
 DEFAULT_PROMPT = DEFAULT_TEMPLATE + '\n\n# 文字起こし\n\n## マイク\n[00:00] 公開日は来月十五日です。\n\n## PC音声\n[00:03] 田中さんが画面を確認します。'
@@ -45,6 +45,11 @@ class Fixtures:
             self.prompt_text = DEFAULT_PROMPT
             self.copied_text = None
             self.calls = []
+            self.monitoring = False
+            self.levels_stale = False
+            self.monitor_error = None
+            self.model = "small" if scenario == "windows_saved" else None
+            self.transcribe_device = "cpu" if scenario == "windows_saved" else None
             self.fail_settings = scenario == 'settings_error'
             self.fail_read = scenario == 'prompt_read_error'
             self.fail_save = scenario == 'prompt_save_error'
@@ -129,12 +134,15 @@ class Handler(BaseHTTPRequestHandler):
         state.tick()
         if state.scenario == 'loading' and parsed.path in ('/api/capabilities', '/api/devices', '/api/settings'):
             time.sleep(12)
-        windows = state.scenario == 'windows'
+        windows = state.scenario.startswith('windows')
         if parsed.path == '/api/capabilities':
-            return self.reply({'ok': True, 'platform': 'win32' if windows else 'darwin', 'updates': windows, 'cuda_setup': windows, 'transcribe_devices': ['cpu', 'auto', 'cuda'] if windows else ['mlx'], 'models': [{'id': name, 'label': f'{name} — {label}'} for name, label in MODELS[:3] if windows] if windows else [{'id': name, 'label': f'{name} — {label}'} for name, label in MODELS], 'default_model': 'base' if windows else 'large-v3-turbo', 'permissions': {'microphone': 'granted', 'system_audio': 'granted'}})
+            return self.reply({'ok': True, 'platform': 'win32' if windows else 'darwin', 'audio_monitor': windows, 'updates': windows, 'cuda_setup': windows, 'transcribe_devices': ['cpu', 'auto', 'cuda'] if windows else ['mlx'], 'models': [{'id': name, 'label': f'{name} — {label}'} for name, label in MODELS], 'default_model': 'large-v3-turbo', 'default_transcribe_device': 'auto' if windows else 'mlx', 'permissions': {'microphone': 'granted', 'system_audio': 'granted'}})
         if parsed.path == '/api/devices':
             devices = [] if state.scenario == 'empty' else [{'id': 'demo-mic', 'index': 0, 'name': '検証用の非常に長い名前のUSBオーディオインターフェース・会議室マイク入力チャンネル' if state.scenario == 'long' else 'MacBook Airのマイク', 'channels': 1, 'sample_rate': 48000, 'is_input': True, 'is_loopback': False, 'is_default': True, 'kind': 'mic'}, {'id': 'demo-system', 'index': 1, 'name': 'スピーカー (Loopback)' if windows else 'Macのシステム音声', 'channels': 2, 'sample_rate': 48000, 'is_input': False, 'is_loopback': True, 'kind': 'system'}]
             return self.reply({'ok': True, 'devices': devices})
+        if parsed.path == '/api/audio-levels':
+            active = state.monitoring or state.recording
+            return self.reply({'ok': True, 'monitoring': state.monitoring, 'error': state.monitor_error, 'levels': {source: {'rms_dbfs': -18 if source == 'mic' else -8, 'peak_dbfs': -4, 'clipping': source == 'system', 'active': active, 'updated_at': time.time() - (5 if state.levels_stale else 0)} for source in ('mic', 'system')}})
         if parsed.path == '/api/events':
             since = int(query.get('since', ['0'])[0])
             return self.reply({'ok': True, 'events': [event for event in state.events if event['id'] > since]})
@@ -147,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/update/check':
             return self.reply({'ok': True, 'current_version': '1.0.0', 'latest_version': '1.1.0', 'update_available': True, 'asset_name': 'Local-Meeting-Notes-Setup.exe', 'asset_size': 104857600})
         if parsed.path == '/__fixture/state':
-            return self.reply({'ok': True, 'prompt_template': state.prompt_template, 'prompt_text': state.prompt_text, 'copied_text': state.copied_text, 'calls': state.calls})
+            return self.reply({'ok': True, 'prompt_template': state.prompt_template, 'prompt_text': state.prompt_text, 'copied_text': state.copied_text, 'calls': state.calls, 'monitoring': state.monitoring})
         if parsed.path == '/__fixture/scenario':
             return self.reply({'ok': True, 'scenario': state.scenario, 'scenarios': SCENARIOS})
         if parsed.path.startswith('/api/'):
@@ -166,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def settings(self):
-        return {'ok': True, 'prompt_template': self.server.fixtures.prompt_template, 'default_prompt_template': DEFAULT_TEMPLATE, 'output_root': self.server.fixtures.output_root, 'default_output_root': LONG_OUTPUT if self.server.fixtures.scenario == 'long' else '/Users/demo/Documents/Meeting Notes'}
+        return {'ok': True, 'model': self.server.fixtures.model, 'transcribe_device': self.server.fixtures.transcribe_device, 'prompt_template': self.server.fixtures.prompt_template, 'default_prompt_template': DEFAULT_TEMPLATE, 'output_root': self.server.fixtures.output_root, 'default_output_root': LONG_OUTPUT if self.server.fixtures.scenario == 'long' else '/Users/demo/Documents/Meeting Notes'}
 
     def do_POST(self):
         try:
@@ -175,7 +183,10 @@ class Handler(BaseHTTPRequestHandler):
             with state.lock:
                 state.calls.append({'path': self.path, 'body': body})
                 if self.path == '/__fixture/config':
-                    for key in ('fail_settings', 'fail_read', 'fail_save', 'fail_copy', 'busy'):
+                    if 'monitor_error' in body:
+                        state.monitor_error = str(body['monitor_error'])
+                        state.monitoring = False
+                    for key in ('fail_settings', 'fail_read', 'fail_save', 'fail_copy', 'busy', 'levels_stale'):
                         if key in body:
                             setattr(state, key, bool(body[key]))
                     if 'delay_save_ms' in body:
@@ -184,6 +195,12 @@ class Handler(BaseHTTPRequestHandler):
                         state.prompt_text = str(body['prompt_text'])
                 elif self.path == '/__fixture/scenario':
                     state.reset(body.get('scenario', 'idle'))
+                elif self.path == '/api/audio-monitor/start':
+                    state.monitor_error = None
+                    state.monitoring = True
+                elif self.path == '/api/audio-monitor/stop':
+                    state.monitor_error = None
+                    state.monitoring = False
                 elif self.path == '/api/recording/start':
                     state.emit('recording_starting', message='録音を準備しています。')
                     state.busy = True
@@ -193,6 +210,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif self.path in ('/api/output/pick-directory', '/api/output/pick-recording-root'):
                     return self.reply({'ok': True, 'output_dir': state.output})
                 elif self.path == '/api/settings':
+                    for key in ('model', 'transcribe_device'):
+                        if key in body:
+                            setattr(state, key, body[key])
                     if 'prompt_template' in body:
                         if state.busy or state.fail_settings:
                             return self.reply({'ok': False, 'error': 'テンプレートを保存できませんでした。再試行してください。'})

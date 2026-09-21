@@ -52,7 +52,7 @@ class WindowsFfmpegBuildTests(unittest.TestCase):
                 ffmpeg.prepare(self.output)
             validate.assert_not_called()
             ffmpeg.prepare(self.output, allow_local_cache=True)
-            validate.assert_called_once_with(self.output)
+            validate.assert_called_once_with(self.output.resolve())
 
     def test_shim_failure_in_isolated_copy_rejects_cache(self):
         self.output.write_bytes(b"shim")

@@ -1,4 +1,5 @@
 import { Cpu, FolderOpen, Mic, Volume2 } from "lucide-react";
+import { LevelMeter } from "./LevelMeter";
 import type { MeetingApp } from "../useMeetingApp";
 
 export function ModelPicker({ app, id = "model" }: { app: MeetingApp; id?: string }) {
@@ -16,10 +17,11 @@ export function ModelPicker({ app, id = "model" }: { app: MeetingApp; id?: strin
 }
 
 export function AudioSources({ app }: { app: MeetingApp }) {
-  return <div className="source-grid">
-    <div className="source-card"><div className="source-title"><Mic size={18} /><label htmlFor="mic-device">マイク</label><span className="source-tag">自分の声</span></div><select id="mic-device" title={app.micDevices.find(device => device.index === app.selectedMicDeviceIndex)?.name || "自動"} value={app.selectedMicDeviceIndex} onChange={event => app.setSelectedMicDeviceIndex(event.target.value === "" ? "" : Number(event.target.value))} disabled={app.busy}><option value="">自動</option>{app.micDevices.map(device => <option key={device.index} value={device.index}>{device.name}</option>)}</select><span className="source-file">mic.wav</span></div>
-    <div className="source-card"><div className="source-title"><Volume2 size={18} /><label htmlFor="system-device">{app.capabilities?.platform === "darwin" ? "Macの再生音" : "PCの再生音"}</label><span className="source-tag">相手の声</span></div><select id="system-device" title={app.systemDevices.find(device => device.index === app.selectedSystemDeviceIndex)?.name || "自動"} value={app.selectedSystemDeviceIndex} onChange={event => app.setSelectedSystemDeviceIndex(event.target.value === "" ? "" : Number(event.target.value))} disabled={app.busy}><option value="">自動</option>{app.systemDevices.map(device => <option key={device.index} value={device.index}>{device.name}</option>)}</select><span className="source-file">system.wav</span></div>
-  </div>;
+  const metering = app.capabilities?.platform === "win32" && app.capabilities.audio_monitor;
+  return <><div className="source-grid">
+    <div className="source-card"><div className="source-title"><Mic size={18} /><label htmlFor="mic-device">マイク</label><span className="source-tag">自分の声</span></div><select id="mic-device" title={app.micDevices.find(device => device.index === app.selectedMicDeviceIndex)?.name || "自動"} value={app.selectedMicDeviceIndex} onChange={event => app.setSelectedMicDeviceIndex(event.target.value === "" ? "" : Number(event.target.value))} disabled={app.busy}><option value="">自動</option>{app.micDevices.map(device => <option key={device.index} value={device.index}>{device.name}</option>)}</select><span className="source-file">mic.wav</span>{metering && <LevelMeter label="マイク" level={app.audioLevels.mic} />}</div>
+    <div className="source-card"><div className="source-title"><Volume2 size={18} /><label htmlFor="system-device">{app.capabilities?.platform === "darwin" ? "Macの再生音" : "PCの再生音"}</label><span className="source-tag">相手の声</span></div><select id="system-device" title={app.systemDevices.find(device => device.index === app.selectedSystemDeviceIndex)?.name || "自動"} value={app.selectedSystemDeviceIndex} onChange={event => app.setSelectedSystemDeviceIndex(event.target.value === "" ? "" : Number(event.target.value))} disabled={app.busy}><option value="">自動</option>{app.systemDevices.map(device => <option key={device.index} value={device.index}>{device.name}</option>)}</select><span className="source-file">system.wav</span>{metering && <LevelMeter label="PC音声" level={app.audioLevels.system} />}</div>
+  </div>{metering && <div className="monitor-actions"><button onClick={app.toggleAudioMonitor} disabled={app.busy || app.monitorBusy || !app.devicesLoaded || !app.micDevices.length}>{app.monitoring ? "入力テストを停止" : "入力テスト"}</button></div>}</>;
 }
 
 export function OutputLocation({ app, compact = false }: { app: MeetingApp; compact?: boolean }) {

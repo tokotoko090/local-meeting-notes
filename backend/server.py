@@ -54,6 +54,10 @@ NEXT_EVENT_ID = 0
 RECORDER: subprocess.Popen[str] | None = None
 TRANSCRIBER: subprocess.Popen[str] | None = None
 PROCESS_LOCK = threading.RLock()
+MONITORS: list[subprocess.Popen[str]] = []
+MONITOR_ERROR: str | None = None
+AUDIO_LEVEL_LOCK = threading.Lock()
+AUDIO_LEVELS = {source: {"rms_dbfs": -60.0, "peak_dbfs": -60.0, "clipping": False, "active": False, "updated_at": 0.0} for source in ("mic", "system")}
 SERVER: ThreadingHTTPServer | None = None
 SHUTTING_DOWN = False
 RECORDING_ACTIVE = False
@@ -126,7 +130,8 @@ def transcription_setting_choices() -> tuple[set[str], set[str], str, str]:
     if sys.platform == "darwin":
         from backend.mlx_transcription import DEFAULT_MODEL, MODEL_OPTIONS
         return {option["id"] for option in MODEL_OPTIONS}, {"mlx"}, DEFAULT_MODEL, "mlx"
-    return {"base", "small", "medium"}, {"cpu", "auto", "cuda"}, "base", "cpu"
+    from backend.windows_transcription import DEFAULT_MODEL, DEFAULT_DEVICE, MODEL_NAMES
+    return set(MODEL_NAMES), {"cpu", "auto", "cuda"}, DEFAULT_MODEL, DEFAULT_DEVICE
 
 
 def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
@@ -194,6 +199,13 @@ def backend_env() -> dict[str, str]:
 
 def emit(payload: dict[str, Any]) -> None:
     global LATEST_OUTPUT_DIR, NEXT_EVENT_ID, RECORDING_ACTIVE
+    if payload.get("event") == "audio_level":
+        source = payload.get("source")
+        if source in AUDIO_LEVELS:
+            with AUDIO_LEVEL_LOCK:
+                AUDIO_LEVELS[source] = {key: payload.get(key) for key in ("rms_dbfs", "peak_dbfs", "clipping", "active")}
+                AUDIO_LEVELS[source]["updated_at"] = time.time()
+        return
     if payload.get("event") == "recording_started":
         RECORDING_ACTIVE = True
     elif payload.get("event") in {"recording_stopped", "error", "complete", "process_closed"}:
@@ -383,6 +395,7 @@ def shutdown_app() -> dict[str, Any]:
         if SHUTTING_DOWN:
             return {"ok": True, "waiting": any_process_running()}
         SHUTTING_DOWN = True
+        stop_audio_monitor()
         if RECORDER and RECORDER.poll() is None and RECORDER.stdin:
             try:
                 RECORDER.stdin.write("shutdown\n" if sys.platform == "darwin" else "stop\n")
@@ -404,7 +417,8 @@ def default_transcription_model() -> str:
     if sys.platform == "darwin":
         from backend.mlx_transcription import DEFAULT_MODEL
         return DEFAULT_MODEL
-    return "small"
+    from backend.windows_transcription import DEFAULT_MODEL
+    return DEFAULT_MODEL
 
 
 def normalize_transcription_options(model: str, device: str) -> tuple[str, str]:
@@ -413,15 +427,21 @@ def normalize_transcription_options(model: str, device: str) -> tuple[str, str]:
         from backend.mlx_transcription import validate_model
         validate_model(model)
         return model, "mlx"
-    return model, device or "cpu"
+    models, devices, _, default_device = transcription_setting_choices()
+    device = device or default_device
+    if model not in models or device not in devices:
+        raise ValueError("未対応の文字起こしモデルまたは処理デバイスです。")
+    return model, device
 
 
 def capabilities() -> dict[str, Any]:
+    from backend.windows_transcription import MODEL_NAMES
     result: dict[str, Any] = {
         "ok": True, "platform": sys.platform, "transcribe_devices": ["mlx"] if sys.platform == "darwin" else ["cpu", "auto", "cuda"],
-        "updates": sys.platform == "win32", "cuda_setup": sys.platform == "win32",
-        "models": [{"id": name, "label": name} for name in ("base", "small", "medium")],
-        "default_model": default_transcription_model() if sys.platform == "darwin" else "base",
+        "audio_monitor": sys.platform == "win32", "updates": sys.platform == "win32", "cuda_setup": sys.platform == "win32",
+        "models": [{"id": name, "label": name} for name in MODEL_NAMES],
+        "default_model": default_transcription_model(),
+        "default_transcribe_device": "mlx" if sys.platform == "darwin" else "auto",
     }
     if sys.platform == "darwin":
         from backend import macos
@@ -626,6 +646,110 @@ def any_process_running() -> bool:
     return bool((RECORDER and RECORDER.poll() is None) or (TRANSCRIBER and TRANSCRIBER.poll() is None))
 
 
+def reset_audio_levels() -> None:
+    with AUDIO_LEVEL_LOCK:
+        for source in AUDIO_LEVELS:
+            AUDIO_LEVELS[source] = {"rms_dbfs": -60.0, "peak_dbfs": -60.0, "clipping": False, "active": False, "updated_at": time.time()}
+
+
+def audio_levels_payload() -> dict[str, Any]:
+    # Publish worker failure and its final error atomically after cleanup.
+    with PROCESS_LOCK:
+        monitoring = bool(MONITORS)
+        with AUDIO_LEVEL_LOCK:
+            levels = {source: dict(level) for source, level in AUDIO_LEVELS.items()}
+            error = MONITOR_ERROR
+    for level in levels.values():
+        if time.time() - level["updated_at"] > 1.5:
+            level.update(rms_dbfs=-60.0, peak_dbfs=-60.0, clipping=False, active=False)
+    return {"ok": True, "levels": levels, "error": error,
+            "monitoring": monitoring}
+
+
+def stop_audio_monitor() -> dict[str, Any]:
+    global MONITOR_ERROR
+    with PROCESS_LOCK:
+        processes = MONITORS[:]
+        MONITORS.clear()
+        for process in processes:
+            if process.poll() is None and process.stdin:
+                try:
+                    process.stdin.write("stop\n")
+                    process.stdin.flush()
+                except (OSError, ValueError):
+                    pass
+        for process in processes:
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            for reader in getattr(process, "monitor_readers", []):
+                reader.join(timeout=1)
+            if process.stdin:
+                process.stdin.close()
+        reset_audio_levels()
+        with AUDIO_LEVEL_LOCK:
+            MONITOR_ERROR = None
+    return {"ok": True, "monitoring": False}
+
+
+def start_audio_monitor(mic_device_index: int | None = None, system_device_index: int | None = None) -> dict[str, Any]:
+    with PROCESS_LOCK:
+        if sys.platform != "win32":
+            return {"ok": False, "error": "Audio monitoring is Windows-only."}
+        if SHUTTING_DOWN or any_process_running():
+            return {"ok": False, "error": "Recording or transcription is running."}
+        stop_audio_monitor()
+        try:
+            # Device enumeration and driver open calls belong in killable workers.
+            selected = (("mic", mic_device_index), ("system", system_device_index))
+            for source, index in selected:
+                args = ["record-one", "--source", source, "--monitor-only"]
+                if index is not None:
+                    args.extend(["--device-index", str(index)])
+                process = subprocess.Popen(backend_args(*args),
+                    cwd=WORK_ROOT, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    encoding="utf-8", errors="replace", bufsize=1, env=backend_env())
+                MONITORS.append(process)
+                process.monitor_error = None
+                def drain(stream, source=source, process=process):
+                    try:
+                        for line in stream:
+                            try:
+                                payload = json.loads(line)
+                            except ValueError:
+                                payload = {"event": "log", "message": line.strip()}
+                            if payload.get("event") == "audio_level":
+                                emit(payload)
+                            else:
+                                if payload.get("event") == "error":
+                                    process.monitor_error = f"{source}: {payload.get('message') or payload.get('error') or 'Audio device failed.'}"
+                                log(f"audio monitor {source}: {line.strip()}")
+                    finally:
+                        stream.close()
+                process.monitor_readers = []
+                for stream in (process.stdout, process.stderr):
+                    reader = threading.Thread(target=drain, args=(stream,), daemon=True)
+                    process.monitor_readers.append(reader)
+                    reader.start()
+            def watch(processes):
+                global MONITOR_ERROR
+                while all(process.poll() is None for process in processes):
+                    time.sleep(0.1)
+                with PROCESS_LOCK:
+                    if MONITORS == processes:
+                        stop_audio_monitor()
+                        with AUDIO_LEVEL_LOCK:
+                            MONITOR_ERROR = next((process.monitor_error for process in processes if process.monitor_error),
+                                                 "Audio input test stopped unexpectedly. Check the selected devices.")
+            threading.Thread(target=watch, args=(MONITORS[:],), daemon=True).start()
+        except Exception as exc:
+            stop_audio_monitor()
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "monitoring": True}
+
+
 def resolve_recording_root(output_root: str) -> Path:
     if not output_root.strip():
         saved_output_root = str(load_settings().get("output_root") or "").strip()
@@ -647,6 +771,7 @@ def start_recording(
     mic_device_id: str = "",
 ) -> dict[str, Any]:
     global RECORDER, LATEST_OUTPUT_DIR
+    stop_audio_monitor()
     if SHUTTING_DOWN or any_process_running():
         return {"ok": False, "error": "Another recording or transcription process is already running."}
     try:
@@ -700,6 +825,7 @@ def resolve_output_dir(output_dir: str) -> Path:
 
 def start_transcription(output_dir: str, model: str, transcribe_device: str) -> dict[str, Any]:
     global TRANSCRIBER, LATEST_OUTPUT_DIR
+    stop_audio_monitor()
     if SHUTTING_DOWN or any_process_running():
         return {"ok": False, "error": "Another recording or transcription process is already running."}
     try:
@@ -898,6 +1024,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self.send_json({"ok": True, "server_version": SERVER_VERSION, "pid": os.getpid(), "busy": any_process_running(), "recording": RECORDING_ACTIVE, "shutting_down": SHUTTING_DOWN})
             return
+        if parsed.path == "/api/audio-levels":
+            self.send_json(audio_levels_payload())
+            return
         if parsed.path == "/api/capabilities":
             self.send_json(capabilities())
             return
@@ -948,13 +1077,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_post(self) -> None:
         body = read_json_body(self)
+        if self.path == "/api/audio-monitor/start":
+            indices = [body.get(key) for key in ("micDeviceIndex", "systemDeviceIndex")]
+            self.send_json(start_audio_monitor(*(int(value) if value not in (None, "") else None for value in indices)))
+            return
+        if self.path == "/api/audio-monitor/stop":
+            self.send_json(stop_audio_monitor())
+            return
         if self.path == "/api/recording/start":
             mic_index = body.get("micDeviceIndex")
             system_index = body.get("systemDeviceIndex")
             self.send_json(
                 start_recording(
-                    str(body.get("model") or default_transcription_model()),
-                    str(body.get("transcribeDevice") or "cpu"),
+                    str(body.get("model") or settings_payload()["model"]),
+                    str(body.get("transcribeDevice") or settings_payload()["transcribe_device"]),
                     int(mic_index) if mic_index not in (None, "") else None,
                     int(system_index) if system_index not in (None, "") else None,
                     str(body.get("outputRoot") or ""),
@@ -969,8 +1105,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(
                 start_transcription(
                     str(body.get("outputDir") or ""),
-                    str(body.get("model") or default_transcription_model()),
-                    str(body.get("transcribeDevice") or "cpu"),
+                    str(body.get("model") or settings_payload()["model"]),
+                    str(body.get("transcribeDevice") or settings_payload()["transcribe_device"]),
                 )
             )
             return

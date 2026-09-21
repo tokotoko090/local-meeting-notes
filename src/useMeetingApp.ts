@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AudioDevice, BackendEvent, Capabilities, PromptResult, GpuStatusResult, SettingsResult, UpdateCheckResult } from "./vite-env";
+import type { AudioDevice, AudioLevel, BackendEvent, Capabilities, PromptResult, GpuStatusResult, SettingsResult, UpdateCheckResult } from "./vite-env";
 
 type RecordingState = "starting" | "idle" | "recording" | "processing" | "complete" | "error";
 
 const API_BASE = window.location.port === "5173" ? "http://127.0.0.1:8765" : window.location.origin;
+const silentLevel: AudioLevel = { rms_dbfs: -60, peak_dbfs: -60, clipping: false, active: false, updated_at: 0 };
 const mojibakeDeviceNameReplacements: Record<string, string> = {
   "\ufffdT\ufffdE\ufffd\ufffd\ufffdh \ufffd}\ufffdb\ufffdp\ufffd[": "サウンド マッパー",
   "\ufffd}\ufffdC\ufffdN": "マイク",
@@ -66,7 +67,10 @@ function deviceKindLabel(kind: AudioDevice["kind"]): string {
 
 export function useMeetingApp() {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
+  const monitorSupported = useRef(false);
+  monitorSupported.current = capabilities?.platform === "win32" && !!capabilities.audio_monitor;
   const [closing, setClosing] = useState(false);
+  const closingRequested = useRef(false);
   const [promptReady, setPromptReady] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
   const [state, commitState] = useState<RecordingState>("idle");
@@ -77,7 +81,13 @@ export function useMeetingApp() {
     commitState(value);
   }
   const [model, setModel] = useState("");
-  const [transcribeDevice, setTranscribeDevice] = useState("cpu");
+  const [transcribeDevice, setTranscribeDevice] = useState("");
+  const [monitoring, setMonitoring] = useState(false);
+  const [monitorBusy, setMonitorBusy] = useState(false);
+  const [audioLevels, setAudioLevels] = useState({ mic: silentLevel, system: silentLevel });
+  const monitorRevision = useRef(0);
+  const monitorWanted = useRef(false);
+  const monitorQueue = useRef<Promise<unknown>>(Promise.resolve());
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [devicesLoaded, setDevicesLoaded] = useState(false);
   const [selectedMicDeviceIndex, setSelectedMicDeviceIndex] = useState<number | "">("");
@@ -110,6 +120,7 @@ export function useMeetingApp() {
   const operationEpoch = useRef(0);
 
   function handleBackendEvent(payload: BackendEvent) {
+    if (payload.event === "audio_level") return;
     if (["recording_starting", "recording_started", "recording_stopped", "transcription_queued", "transcription_started", "transcribing", "transcription_complete", "transcript_generated", "prompt_generated", "complete", "error", "process_closed"].includes(payload.event)) lifecycleRevision.current += 1;
     setEvents((current) => [payload, ...current].slice(0, 100));
 
@@ -120,7 +131,10 @@ export function useMeetingApp() {
     }
     if (payload.event === "recording_starting") { setState("starting"); setPromptReady(false); setCopyStatus(""); }
     if (payload.event === "prompt_generated") { setPromptReady(true); setStage("done"); }
-    if (payload.event === "status" && payload.message?.includes("モデル")) setNotice(payload.message);
+    if (payload.event === "status" && payload.message?.includes("モデル")) {
+      setNotice(payload.message);
+      setStage(current => current === "prepare" || current === "model" ? "model" : current);
+    }
     if (payload.event === "transcription_complete" || (payload.event === "transcribing" && payload.file === "system.wav")) setNotice(current => current.includes("モデル") ? "" : current);
     if (payload.event === "transcribing") setStage(payload.file === "system.wav" ? "system" : "mic");
     if (payload.event === "transcription_complete" || payload.event === "transcript_generated") setStage("files");
@@ -203,6 +217,89 @@ export function useMeetingApp() {
     else setTranscribeDevice(result.transcribe_device ?? value);
   }
 
+  function stopAudioMonitor() {
+    monitorWanted.current = false;
+    monitorRevision.current += 1;
+    setMonitoring(false);
+    setAudioLevels({ mic: silentLevel, system: silentLevel });
+    if (!monitorSupported.current) return Promise.resolve({ ok: true });
+    const task = monitorQueue.current.then(() => apiCall("/api/audio-monitor/stop", {}));
+    monitorQueue.current = task;
+    return task;
+  }
+
+  async function toggleAudioMonitor() {
+    if (monitorWanted.current) { await stopAudioMonitor(); return; }
+    if (!capabilities?.audio_monitor || capabilities.platform !== "win32" || monitorBusy || closingRequested.current || closing || ["starting", "recording", "processing"].includes(stateRef.current)) return;
+    monitorWanted.current = true;
+    const revision = ++monitorRevision.current;
+    setMonitorBusy(true);
+    const task = monitorQueue.current.then(() => revision === monitorRevision.current
+      ? apiCall("/api/audio-monitor/start", { micDeviceIndex: selectedMicDeviceIndex, systemDeviceIndex: selectedSystemDeviceIndex })
+      : { ok: false });
+    monitorQueue.current = task;
+    const result = await task;
+    if (revision === monitorRevision.current) {
+      setMonitoring(!!result.ok);
+      monitorWanted.current = !!result.ok;
+      if (!result.ok) { setNotice(result.error || "入力テストを開始できませんでした。"); await stopAudioMonitor(); }
+    }
+    setMonitorBusy(false);
+  }
+
+  useEffect(() => {
+    if (!capabilities?.audio_monitor || capabilities.platform !== "win32" || closing || (!monitoring && state !== "recording")) {
+      setAudioLevels({ mic: silentLevel, system: silentLevel });
+      return;
+    }
+    let canceled = false;
+    let fetching = false;
+    let lastResponse = 0;
+    let latest = { mic: silentLevel, system: silentLevel };
+    const holds = { mic: 0, system: 0 };
+    async function poll() {
+      if (!fetching) {
+        fetching = true;
+        void apiCall("/api/audio-levels").then(result => {
+          if (!canceled && result.ok && result.levels) {
+            latest = result.levels; lastResponse = Date.now();
+            if (monitoring && monitorWanted.current && result.monitoring === false) {
+              monitorWanted.current = false;
+              setMonitoring(false);
+              setNotice(result.error || "入力テストが停止しました。音声デバイスを確認してください。");
+            }
+          }
+        }).finally(() => { fetching = false; });
+      }
+      const now = Date.now();
+      setAudioLevels(previous => Object.fromEntries((["mic", "system"] as const).map(source => {
+        const value = latest[source];
+        if (!value?.active || now - lastResponse > 1500 || now - value.updated_at * 1000 > 1500) return [source, silentLevel];
+        const peak = Math.max(-60, Math.min(0, value.peak_dbfs));
+        if (peak >= previous[source].peak_dbfs) holds[source] = now + 350;
+        return [source, { ...value, peak_dbfs: Math.max(peak, previous[source].peak_dbfs - (now >= holds[source] ? 4 : 0)) }];
+      })) as typeof previous);
+    }
+    void poll();
+    const timer = window.setInterval(poll, 120);
+    return () => { canceled = true; window.clearInterval(timer); };
+  }, [capabilities, monitoring, state, closing]);
+
+  useEffect(() => () => { if (monitorWanted.current) void stopAudioMonitor(); }, []);
+
+  useEffect(() => {
+    const onPageHide = () => {
+      if (!monitorSupported.current || !monitorWanted.current) return;
+      monitorWanted.current = false;
+      monitorRevision.current += 1;
+      void fetch(`${API_BASE}/api/audio-monitor/stop`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}", keepalive: true
+      }).catch(() => {});
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
+
   async function savePromptTemplate(text: string): Promise<SettingsResult> {
     if (["starting", "recording", "processing"].includes(stateRef.current) || closing) return { ok: false, error: "録音・文字起こし中は変更できません。" };
     const result: SettingsResult = await apiCall("/api/settings", { prompt_template: text });
@@ -283,6 +380,7 @@ export function useMeetingApp() {
   }, [state, closing]);
 
   async function refreshDevices() {
+    if (monitorWanted.current) await stopAudioMonitor();
     const result = await apiCall("/api/devices");
     if (result.ok) {
       const nextDevices: AudioDevice[] = (result.devices || []).map((device: AudioDevice) => ({ ...device, name: normalizeDeviceName(device.name) }));
@@ -309,6 +407,8 @@ export function useMeetingApp() {
     if (!capabilities || !devicesLoaded || !devices.some(device => device.kind === "mic") || ["starting", "recording", "processing"].includes(stateRef.current) || closing) return;
     const epoch = ++operationEpoch.current;
     setState("starting");
+    if (capabilities.audio_monitor) await stopAudioMonitor();
+    if (epoch !== operationEpoch.current || closingRequested.current) { setState("idle"); return; }
     setCanRecover(false); setPromptReady(false); setCopyStatus(""); setOutputDir(""); setNotice(""); setElapsed(0); setStage("prepare");
     setError("");
     const options = { micDeviceId: devices.find(d => d.index === selectedMicDeviceIndex && d.kind === "mic")?.id, model, transcribeDevice, micDeviceIndex: selectedMicDeviceIndex, systemDeviceIndex: selectedSystemDeviceIndex, outputRoot: outputRootDir };
@@ -358,6 +458,8 @@ export function useMeetingApp() {
     setError("");
     setState("processing");
     const options = { outputDir: target, model, transcribeDevice };
+    if (capabilities.audio_monitor) await stopAudioMonitor();
+    if (epoch !== operationEpoch.current || closingRequested.current) { setState("idle"); return; }
     const revision = lifecycleRevision.current;
     const result = await apiCall("/api/transcribe-existing", options);
     if (operationEpoch.current !== epoch) return;
@@ -478,9 +580,16 @@ export function useMeetingApp() {
   }
 
   async function shutdownApp() {
+    if (closingRequested.current) return;
+    closingRequested.current = true;
+    operationEpoch.current += 1;
+    setClosing(true);
+    if (capabilities?.audio_monitor) await stopAudioMonitor();
     setNotice("");
     const result = await apiCall("/api/shutdown", {});
     if (!result.ok) {
+      closingRequested.current = false;
+      setClosing(false);
       setNotice(result.error || "アプリを終了できませんでした。");
       return;
     }
@@ -496,7 +605,7 @@ export function useMeetingApp() {
     }
     setCapabilities(result);
     setModel((current) => result.models.some((option: { id: string }) => option.id === current) ? current : result.default_model);
-    setTranscribeDevice((current) => result.platform === "darwin" ? "mlx" : result.transcribe_devices.includes(current) ? current : "cpu");
+    setTranscribeDevice((current) => result.platform === "darwin" ? "mlx" : result.transcribe_devices.includes(current) ? current : result.default_transcribe_device || "auto");
     if (result.cuda_setup) void refreshGpuStatus();
   }
 
@@ -507,7 +616,7 @@ export function useMeetingApp() {
   }, []);
 
   useEffect(() => {
-    const onClosing = () => setClosing(true);
+    const onClosing = () => { closingRequested.current = true; operationEpoch.current += 1; if (monitorWanted.current) void stopAudioMonitor(); setClosing(true); };
     window.addEventListener("meeting-app-closing", onClosing);
     return () => window.removeEventListener("meeting-app-closing", onClosing);
   }, []);
@@ -525,8 +634,10 @@ export function useMeetingApp() {
 
   const busy = closing || state === "starting" || state === "recording" || state === "processing";
   return { capabilities, closing, promptReady, copyStatus, state, model, setModel: (value: string) => void saveTranscriptionSetting("model", value),
-    transcribeDevice, setTranscribeDevice: (value: string) => void saveTranscriptionSetting("transcribe_device", value), devices, selectedMicDeviceIndex, setSelectedMicDeviceIndex,
-    selectedSystemDeviceIndex, setSelectedSystemDeviceIndex, error, outputDir, outputRootDir,
+    transcribeDevice, setTranscribeDevice: (value: string) => void saveTranscriptionSetting("transcribe_device", value), devices, selectedMicDeviceIndex,
+    setSelectedMicDeviceIndex: (value: number | "") => { if (monitorWanted.current) void stopAudioMonitor(); setSelectedMicDeviceIndex(value); },
+    selectedSystemDeviceIndex, setSelectedSystemDeviceIndex: (value: number | "") => { if (monitorWanted.current) void stopAudioMonitor(); setSelectedSystemDeviceIndex(value); }, error, outputDir, outputRootDir,
+    monitoring, monitorBusy, audioLevels, toggleAudioMonitor, stopAudioMonitor,
     defaultOutputRootDir, promptTemplate, defaultPromptTemplate, settingsLoaded, savePromptTemplate, readPrompt, savePrompt, existingOutputDir, setExistingOutputDir, micDevice, systemDevice, elapsed, events,
     updateInfo, updateStatus, updateBusy, downloadedInstaller, gpuStatus, gpuBusy, statusLabel, busy, devicesLoaded,
     micDevices, systemDevices, startRecording, stopRecording, transcribeExisting, openFolder, copyPrompt,

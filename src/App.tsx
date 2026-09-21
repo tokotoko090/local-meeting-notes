@@ -15,6 +15,9 @@ export default function App() {
   const [sessionTab, setSessionTab] = useState<Tab>("record");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [promptTarget, setPromptTarget] = useState<string | null>(null);
+  useEffect(() => {
+    if ((tab !== "record" || settingsOpen || promptTarget) && (app.monitoring || app.monitorBusy)) void app.stopAudioMonitor();
+  }, [tab, settingsOpen, promptTarget]);
   const [existingPrompt, setExistingPrompt] = useState<{ path: string; status: "loading" | "ready" | "missing"; error?: string } | null>(null);
   useEffect(() => {
     let canceled = false;

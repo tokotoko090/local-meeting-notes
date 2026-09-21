@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 _test_root = tempfile.TemporaryDirectory()
 os.environ.setdefault('LOCAL_MEETING_NOTES_DATA_ROOT', _test_root.name)
 from backend import server
+from backend import meeting_notes as notes
 
 
 class TranscriptionSettingsTests(unittest.TestCase):
@@ -18,6 +19,29 @@ class TranscriptionSettingsTests(unittest.TestCase):
         target = patch.object(server, 'SETTINGS_PATH', self.path)
         target.start()
         self.addCleanup(target.stop)
+
+    def test_windows_fresh_settings_capability_and_cli_agree_on_turbo_auto(self):
+        with patch.object(server.sys, 'platform', 'win32'):
+            settings = server.settings_payload()
+            capability = server.capabilities()
+            self.assertEqual((settings['model'], settings['transcribe_device']), ('large-v3-turbo', 'auto'))
+            self.assertEqual((capability['default_model'], capability['default_transcribe_device']), ('large-v3-turbo', 'auto'))
+            self.assertIn('large-v3-turbo', [model['id'] for model in capability['models']])
+            for argv in (['record'], ['generate', 'test-folder', '--transcribe']):
+                parsed = notes.build_parser().parse_args(argv)
+                self.assertEqual((parsed.model, parsed.transcribe_device), ('large-v3-turbo', 'auto'))
+            self.assertFalse(self.path.exists(), 'Reading defaults must not rewrite user settings')
+
+    def test_saved_base_cpu_stays_unchanged_and_turbo_can_be_persisted(self):
+        original = {'model': 'base', 'transcribe_device': 'cpu'}
+        self.path.write_text(json.dumps(original), encoding='utf-8')
+        before = self.path.read_bytes()
+        with patch.object(server.sys, 'platform', 'win32'):
+            payload = server.settings_payload()
+            self.assertEqual((payload['model'], payload['transcribe_device']), ('base', 'cpu'))
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertTrue(server.update_settings({'model': 'large-v3-turbo', 'transcribe_device': 'auto'})['ok'])
+            self.assertEqual(server.load_settings(), {'model': 'large-v3-turbo', 'transcribe_device': 'auto'})
 
     def test_windows_upgrade_retains_saved_choices_and_other_settings(self):
         previous = {'model': 'medium', 'transcribe_device': 'cuda',

@@ -16,6 +16,16 @@ Windows の検証ではインストーラーから導入した EXE を使用し�
 
 ## 1. 同じソースから両 OS をビルドする
 
+### Windows の音量メーターと turbo
+
+Windows の新規設定は `large-v3-turbo` / `auto` です。保存済みのモデルと処理デバイスは引き継ぎます。Windows は faster-whisper 1.2.1 以上を使い、CUDA は FP16、CPU は INT8、CUDA 失敗時には通知して CPU へ切り替えます。Mac の MLX / GPU / FP16 専用経路は維持します。
+
+モデルはインストーラーに含めません。初回利用時に取得し、以後は Hugging Face のローカルキャッシュを優先します。同一ジョブのマイク・PC 音声はモデルを共有し、ジョブ終了時に解放します。キャッシュ利用の検証は取得済みモデルと `HF_HUB_OFFLINE=1` で実行できます。取得失敗では録音を保持し、再実行できるエラーを表示します。
+
+Windows 実機では入力テスト中に WAV や会議フォルダが作成されないこと、マイク・PC 音声のメーター、入力テストから録音への切り替え、無音状態での停止、デバイス変更・画面切り替え・終了時の後片付けを確認します。メーターは録音と同じ PCM を計測し、音量イベントを通常ログへ蓄積しません。Mac ではメーターと監視 API 呼び出しがないことも回帰テストで確認します。
+
+速度・認識精度の比較は今回の依頼から除外されました。GPU / CPU の動作確認を性能比較や Mac と同等の速度・精度の証明として扱わないでください。
+
 候補 commit の完全な SHA を控えます。Windows artifact から `LocalMeetingNotesSetup-<version>.exe` と `windows-manifest.json` を取得します。
 
 Apple Silicon Mac で同じ commit を checkout し、次を実行します。

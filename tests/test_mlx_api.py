@@ -28,11 +28,12 @@ class MlxApiTests(unittest.TestCase):
     def test_windows_capabilities(self):
         with patch.object(server.sys, "platform", "win32"):
             result = server.capabilities()
-        self.assertEqual(result["default_model"], "base")
+        self.assertEqual(result["default_model"], "large-v3-turbo")
+        self.assertEqual(result["default_transcribe_device"], "auto")
         with patch.object(server.sys, "platform", "win32"):
-            self.assertEqual(server.default_transcription_model(), "small")
+            self.assertEqual(server.default_transcription_model(), "large-v3-turbo")
         self.assertEqual(result["transcribe_devices"], ["cpu", "auto", "cuda"])
-        self.assertEqual([m["id"] for m in result["models"]], ["base", "small", "medium"])
+        self.assertEqual([m["id"] for m in result["models"]], ["base", "small", "medium", "large-v3-turbo"])
 
     def test_mac_legacy_device_is_normalized_and_default_applied(self):
         for device in ("", "cpu", "cuda", "auto", "mlx"):

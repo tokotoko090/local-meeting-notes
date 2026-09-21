@@ -62,6 +62,8 @@ export type SettingsResult = {
 };
 
 export type Capabilities = {
+  audio_monitor?: boolean;
+  default_transcribe_device?: string;
   ok: boolean;
   platform: string;
   updates: boolean;
@@ -71,5 +73,7 @@ export type Capabilities = {
   default_model: string;
   permissions?: { microphone?: string; system_audio?: string; error?: string };
 };
+
+export type AudioLevel = { rms_dbfs: number; peak_dbfs: number; clipping: boolean; active: boolean; updated_at: number };
 
 export type PromptResult = { ok: boolean; text?: string; saved?: boolean; error?: string };

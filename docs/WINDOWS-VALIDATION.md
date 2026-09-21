@@ -6,7 +6,20 @@ This is a Windows correction candidate, not approval to publish v0.3.0. The old 
 
 The installed draft, matching installer SHA-256 `7a0de09b333b7bd121691b23f8b961879788e0d979c287b070bfa1bb86608365`, recorded WAV files but failed transcription with `Cannot find file at '..\\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe'` below `_MEI...`. The build had copied a Chocolatey shim. The corrected installer deploys a checksum-verified standalone ffmpeg beside the application; the same captured WAVs completed CPU transcription after reinstalling.
 
-## Completed on Windows 11
+## Current Windows meters / turbo candidate
+
+- Python: 81 tests run, 79 passed, 2 environment-specific skips. Vite/TypeScript, Python compilation, PyInstaller and NSIS builds passed. Chromium UI: 94/94; prompt regression: 13/13. The two initial UI failures exposed progress moving backwards on model status; fixed and the complete suite rerun successfully.
+- Installed `LocalMeetingNotesSetup-0.3.0.exe` SHA-256: `abeff2aa936926bdebacc9f87b8f4b2810335e65c93c1575cf061c3a864a5fcf`. The adjacent manifest records the final source commit. This is a separate correction candidate; the old tag/draft remain unchanged.
+- A fresh isolated data directory exposed `large-v3-turbo` / `auto`. Both real Razer mic and INZONE loopback meters updated during input testing, and no output directory/audio files were created. Starting recording stopped the monitor workers and used recording PCM for both meters.
+- Approximately 41 seconds of actual mic/loopback recording stopped and saved successfully. Packaged turbo used RTX 3080 CUDA/FP16 for both streams with no fallback. The mic contained ambient sound and no recognized speech; the loopback produced two speech segments. Both JSON outputs, transcript Markdown and prompt Markdown were created. Original error did not recur from the Japanese/space-containing installation and data paths.
+- Packaged turbo CPU/INT8 transcribed both copies of a dedicated 40.9-second synthetic Japanese reference. Both streams contained recognized speech. `HF_HUB_OFFLINE=1` was set for packaged GPU and CPU checks: cached weights worked without network acquisition. One model-load status per two-track job confirmed session reuse. Initial model acquisition succeeded separately before these checks; download failure/status behavior is covered by unit tests.
+- Performance/accuracy comparison was explicitly removed from scope by the user. No CPU/GPU benchmark comparison or Mac-equivalence claim is made.
+- Switching tabs and browser reload stopped input testing. An invalid microphone index caused both workers to stop and returned an actionable error; restarting/stopping cleared it. Stale/silent/clipping behavior and Mac exclusion passed automated tests.
+- Individual prompt save/copy matched the actual Windows clipboard exactly, including Japanese, emoji and trailing newline. The common template was changed in the UI and applied to a subsequent dedicated transcription. Restarting the normally installed EXE retained `small` / `cpu`, the common template, and the individual edited prompt.
+- v0.2.9 was installed into the dedicated upgrade directory and overwritten directly with this candidate. All 12 legacy settings/recording files remained byte-identical. Normal-path installation also preserved all 289 existing user settings/recording files; no test audio was put into the user's recording directory.
+- Previous CI failure was a test comparison of Windows short (`RUNNER~1`) and resolved long paths. Expected ffmpeg paths now use `resolve()` as the implementation does.
+
+## Previous ffmpeg correction baseline
 
 - Python: 63 tests run, 61 passed, 2 environment-specific skips (native Mac helper unavailable; Windows symlink privilege unavailable). Compilation and `git diff --check` passed.
 - Vite/TypeScript build, PyInstaller EXE and NSIS installer build passed.
@@ -22,6 +35,6 @@ The installed draft, matching installer SHA-256 `7a0de09b333b7bd121691b23f8b9618
 
 ## Remaining cross-platform checks
 
-Mac cannot be validated on this Windows host. Rebuild the Mac artifact from the same correction commit and repeat MLX/GPU/FP16 recording/transcription, settings persistence, prompt edit/save/copy and restart. Shared changes affect settings serialization/initialization and clipboard subprocess input; Windows ffmpeg and WASAPI changes do not switch Mac to CPU. The default remains `large-v3-turbo` and MLX only.
+Mac cannot be validated on this Windows host. Rebuild the Mac artifact from the same final correction commit and repeat MLX/GPU/FP16 recording/transcription, settings persistence, prompt edit/save/copy and restart. Shared changes affect capability/default initialization, recording/transcription lifecycle, model status display, settings serialization and clipboard subprocess input. Confirm no meter or monitor API calls on Mac. Windows session/model acquisition is separate from MLX and does not switch Mac to CPU. The Mac default remains `large-v3-turbo` and MLX only.
 
 No master merge, tag movement, draft asset replacement or official release publication was performed. Audio, transcripts, personal settings, model caches and build products remain outside Git.
