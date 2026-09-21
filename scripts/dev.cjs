@@ -7,12 +7,6 @@ const viteBin = path.join(root, "node_modules", ".bin", process.platform === "wi
 const electronBin = require("electron");
 const port = 5173;
 
-const api = spawn("python", ["backend/server.py"], {
-  cwd: root,
-  stdio: "inherit",
-  env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" }
-});
-
 const vite = spawn(viteBin, ["--host", "127.0.0.1", "--port", String(port)], {
   cwd: root,
   stdio: "inherit",
@@ -49,7 +43,6 @@ waitForServer()
     });
     electron.on("error", (error) => {
       console.error("Electron failed to start:", error);
-      api.kill();
       vite.kill();
       process.exit(1);
     });
@@ -59,14 +52,12 @@ waitForServer()
         console.error(`Electron crashed before startup. Browser fallback is available at http://127.0.0.1:${port}`);
         return;
       }
-      api.kill();
       vite.kill();
       process.exit(code ?? 0);
     });
   })
   .catch((error) => {
     console.error(error);
-    api.kill();
     vite.kill();
     process.exit(1);
   });

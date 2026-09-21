@@ -10,3 +10,5 @@ vendor/
 __pycache__/
 *.pyc
 *.log
+.venv-mlx/
+.validation/

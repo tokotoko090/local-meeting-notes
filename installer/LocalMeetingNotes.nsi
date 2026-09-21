@@ -22,6 +22,9 @@ Section "Install"
   ExecWait '"$SYSDIR\taskkill.exe" /IM "${EXE_NAME}" /F'
   SetOutPath "$INSTDIR"
   File "..\dist-app\${EXE_NAME}"
+  SetOutPath "$INSTDIR\vendor"
+  File "..\vendor\ffmpeg.exe"
+  SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
@@ -43,6 +46,8 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\${APP_NAME}"
 
   Delete "$INSTDIR\${EXE_NAME}"
+  Delete "$INSTDIR\vendor\ffmpeg.exe"
+  RMDir "$INSTDIR\vendor"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
 
