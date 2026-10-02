@@ -1,243 +1,153 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("electron");
-const { spawn } = require("node:child_process");
-const fs = require("node:fs");
-const path = require("node:path");
-const readline = require("node:readline");
+const { app, BrowserWindow, dialog, shell, Menu, nativeTheme } = require('electron');
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const fs = require('node:fs');
+const readline = require('node:readline');
+const root = path.resolve(__dirname, '..');
+let mainWindow;
+let backend;
+let backendURL;
+let quitting = false;
+let backendStopped = false;
+let logStream;
 
-const root = path.resolve(__dirname, "..");
-const logPath = path.join(root, "electron.log");
-let mainWindow = null;
-let recorder = null;
-let transcriber = null;
-let latestOutputDir = null;
-
-function writeMainLog(message) {
-  fs.appendFileSync(logPath, `${new Date().toISOString()} ${message}\n`, "utf8");
-}
-
-function pythonCommand() {
-  const venvPython = path.join(root, ".venv", "Scripts", "python.exe");
-  if (fs.existsSync(venvPython)) {
-    return venvPython;
-  }
-  return "python";
-}
-
-function backendArgs(args) {
-  return [path.join(root, "backend", "meeting_notes.py"), ...args];
-}
-
-function sendBackendEvent(payload) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("backend:event", payload);
-  }
-}
-
-function createWindow() {
-  writeMainLog("createWindow");
-  mainWindow = new BrowserWindow({
-    width: 1040,
-    height: 760,
-    minWidth: 860,
-    minHeight: 640,
-    backgroundColor: "#f7f7f4",
-    webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  if (process.env.VITE_DEV_SERVER_URL) {
-    writeMainLog(`loadURL ${process.env.VITE_DEV_SERVER_URL}`);
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
-  } else {
-    writeMainLog("loadFile dist/index.html");
-    mainWindow.loadFile(path.join(root, "dist", "index.html"));
-  }
-}
-
-function spawnBackend(args) {
-  return spawn(pythonCommand(), backendArgs(args), {
-    cwd: root,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" }
-  });
-}
-
-function attachProcess(child, processName, onClose) {
-  const stdout = readline.createInterface({ input: child.stdout });
-  stdout.on("line", (line) => {
-    try {
-      const payload = JSON.parse(line);
-      if (payload.output_dir) {
-        latestOutputDir = payload.output_dir;
+function log(text) { logStream?.write(`${new Date().toISOString()} ${text}\n`); }
+function startBackend() {
+  return new Promise((resolve, reject) => {
+    const binary = app.isPackaged
+      ? path.join(process.resourcesPath, 'backend', 'LocalMeetingNotesBackend')
+      : path.join(root, process.platform === 'darwin' ? '.venv-mlx' : '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+    const args = app.isPackaged ? [] : [path.join(root, 'app_launcher.py')];
+    backend = spawn(binary, args, {
+      cwd: app.getPath('userData'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8',
+        LOCAL_MEETING_NOTES_MANAGED: '1', LOCAL_MEETING_NOTES_OPEN_BROWSER: '0',
+        LOCAL_MEETING_NOTES_PORT: process.env.VITE_DEV_SERVER_URL ? '8765' : '0',
+        LOCAL_MEETING_NOTES_AUDIO_HELPER: app.isPackaged
+          ? path.join(process.resourcesPath, 'vendor', 'MeetingAudio')
+          : path.join(root, 'vendor', 'MeetingAudio'),
+        LOCAL_MEETING_NOTES_STATIC_ROOT: app.isPackaged
+          ? path.join(process.resourcesPath, 'dist') : path.join(root, 'dist') }
+    });
+    const timeout = setTimeout(() => {
+      reject(new Error('ローカル処理の起動がタイムアウトしました。ログを確認してください。'));
+      backend.stdin.end();
+    }, 30000);
+    backend.on('error', error => { backendStopped = true; clearTimeout(timeout); reject(error); });
+    backend.stderr.on('data', data => log(data.toString()));
+    const lines = readline.createInterface({ input: backend.stdout });
+    lines.on('line', async line => {
+      log(line);
+      let event;
+      try { event = JSON.parse(line); } catch { return; }
+      if (event.event === 'native_request' && event.command === 'pick-directory') {
+        let result;
+        try {
+          const choice = await dialog.showOpenDialog(mainWindow, {
+            title: event.create ? '録音の保存先を選択' : '既存の録音フォルダを選択',
+            defaultPath: event.initial,
+            properties: ['openDirectory', ...(event.create ? ['createDirectory'] : [])]
+          });
+          result = choice.canceled ? { ok: false, canceled: true } : { ok: true, output_dir: choice.filePaths[0] };
+        } catch (error) { result = { ok: false, error: error.message }; }
+        if (!backend.stdin.destroyed) backend.stdin.write(JSON.stringify({ id: event.id, result }) + '\n');
+        return;
       }
-      sendBackendEvent(payload);
-    } catch {
-      sendBackendEvent({ event: "log", message: line });
-    }
-  });
-
-  child.stderr.on("data", (chunk) => {
-    sendBackendEvent({ event: "log", message: chunk.toString("utf8") });
-  });
-
-  child.on("close", (code) => {
-    sendBackendEvent({
-      event: code === 0 ? "process_closed" : "error",
-      code,
-      output_dir: latestOutputDir,
-      message: code === 0 ? "Complete." : `${processName} process failed.`
-    });
-    onClose();
-  });
-}
-
-ipcMain.handle("devices:list", async () => {
-  return new Promise((resolve) => {
-    const child = spawnBackend(["list-devices", "--json"]);
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("close", (code) => {
-      let devices = [];
+      if (event.event !== 'server_ready') return;
       try {
-        devices = JSON.parse(stdout).devices || [];
-      } catch {
-        devices = [];
+        const response = await fetch(`${event.url}/api/health`);
+        const health = await response.json();
+        if (health.pid !== backend.pid || !health.ok) throw new Error('起動したローカルサーバーを確認できません。');
+        backendURL = event.url;
+        clearTimeout(timeout);
+        resolve();
+      } catch (error) { clearTimeout(timeout); reject(error); }
+    });
+    backend.on('exit', (code) => {
+      clearTimeout(timeout);
+      backendStopped = true;
+      if (!backendURL) reject(new Error(`ローカル処理を開始できませんでした (${code})。`));
+      else {
+        if (!quitting && code !== 0) dialog.showErrorBox('Local Meeting Notes', 'ローカル処理が停止しました。アプリを再起動してください。');
+        app.quit();
       }
-      resolve({ ok: code === 0, output: stdout.trim(), devices, error: stderr.trim() });
     });
   });
-});
-
-ipcMain.handle("recording:start", async (_event, options = {}) => {
-  if (recorder || transcriber) {
-    return { ok: false, error: "Another recording or transcription process is already running." };
-  }
-
-  const model = options.model || "small";
-  const transcribeDevice = options.transcribeDevice || "cpu";
-  const args = ["record", "--model", model, "--transcribe-device", transcribeDevice];
-  if (options.outputRoot) {
-    const outputDir = path.join(options.outputRoot, new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19));
-    args.push("--output-dir", outputDir);
-  }
-  if (options.micDeviceIndex !== undefined && options.micDeviceIndex !== "") {
-    args.push("--mic-device-index", String(options.micDeviceIndex));
-  }
-  if (options.systemDeviceIndex !== undefined && options.systemDeviceIndex !== "") {
-    args.push("--system-device-index", String(options.systemDeviceIndex));
-  }
-  recorder = spawnBackend(args);
-  latestOutputDir = null;
-  attachProcess(recorder, "Recording", () => {
-    recorder = null;
+}
+function createWindow() {
+  mainWindow = new BrowserWindow({ width: 1040, height: 840, minWidth: 860, minHeight: 640,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#111816' : '#f5f7f5', show: false,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  mainWindow.once('ready-to-show', () => mainWindow.show());
+  const url = process.env.VITE_DEV_SERVER_URL || backendURL;
+  mainWindow.loadURL(url);
+  mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
+    if (target.startsWith('https://github.com/tokotoko090/local-meeting-notes/')) shell.openExternal(target);
+    return { action: 'deny' };
   });
-
-  return { ok: true };
-});
-
-ipcMain.handle("recording:stop", async () => {
-  if (!recorder) {
-    return { ok: false, error: "Recording is not running." };
-  }
-  recorder.stdin.write("stop\n");
-  return { ok: true };
-});
-
-ipcMain.handle("transcribe:existing", async (_event, options = {}) => {
-  if (recorder || transcriber) {
-    return { ok: false, error: "Another recording or transcription process is already running." };
-  }
-  const outputDir = options.outputDir || latestOutputDir;
-  if (!outputDir || !fs.existsSync(outputDir)) {
-    return { ok: false, error: "Output folder does not exist." };
-  }
-  latestOutputDir = outputDir;
-  const model = options.model || "small";
-  const transcribeDevice = options.transcribeDevice || "cpu";
-  sendBackendEvent({ event: "transcription_queued", output_dir: outputDir, model, transcribe_device: transcribeDevice });
-  transcriber = spawnBackend(["generate", outputDir, "--transcribe", "--model", model, "--transcribe-device", transcribeDevice]);
-  attachProcess(transcriber, "Transcription", () => {
-    transcriber = null;
+  mainWindow.webContents.on('will-navigate', (event, target) => {
+    if (new URL(target).origin !== new URL(url).origin) event.preventDefault();
   });
-  return { ok: true, output_dir: outputDir };
-});
-
-ipcMain.handle("output:pick-directory", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select an existing Local Meeting Notes output folder",
-    defaultPath: path.join(root, "output"),
-    properties: ["openDirectory"]
+  mainWindow.on('close', event => {
+    if (!backendStopped) { event.preventDefault(); app.quit(); }
   });
-  if (result.canceled || result.filePaths.length === 0) {
-    return { ok: false, canceled: true };
-  }
-  return { ok: true, output_dir: result.filePaths[0] };
-});
-
-ipcMain.handle("output:pick-recording-root", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select where new recordings should be saved",
-    defaultPath: path.join(root, "output"),
-    properties: ["openDirectory", "createDirectory"]
+  mainWindow.webContents.on('will-prevent-unload', event => {
+    if (quitting) event.preventDefault();
   });
-  if (result.canceled || result.filePaths.length === 0) {
-    return { ok: false, canceled: true };
-  }
-  return { ok: true, output_dir: result.filePaths[0] };
-});
-
-ipcMain.handle("output:open", async (_event, outputDir) => {
-  const target = outputDir || latestOutputDir;
-  if (!target) {
-    return { ok: false, error: "No output folder is available yet." };
-  }
-  const error = await shell.openPath(target);
-  return { ok: !error, error };
-});
-
-ipcMain.handle("prompt:copy", async (_event, outputDir) => {
-  const target = outputDir || latestOutputDir;
-  if (!target) {
-    return { ok: false, error: "No output folder is available yet." };
-  }
-  const promptPath = path.join(target, "chatgpt_prompt.md");
-  if (!fs.existsSync(promptPath)) {
-    return { ok: false, error: "chatgpt_prompt.md has not been generated yet." };
-  }
-  clipboard.writeText(fs.readFileSync(promptPath, "utf8"));
-  return { ok: true };
-});
-
-app.whenReady().then(() => {
-  writeMainLog("app ready");
-  createWindow();
-});
-
-app.on("window-all-closed", () => {
-  writeMainLog("window-all-closed");
-  if (recorder) {
-    recorder.kill();
-  }
-  if (transcriber) {
-    transcriber.kill();
-  }
-  if (process.platform !== "darwin") {
-    app.quit();
+}
+nativeTheme.on('updated', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#111816' : '#f5f7f5');
   }
 });
-
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+let checkingUnsaved = false;
+async function stopBackend() {
+  if (quitting || checkingUnsaved) return;
+  checkingUnsaved = true;
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const edit = await mainWindow.webContents.executeJavaScript("({ dirty: document.documentElement.dataset.promptDirty === 'true', saving: document.documentElement.dataset.promptSaving === 'true' })");
+      if (edit.saving) {
+        await dialog.showMessageBox(mainWindow, { type: 'info', message: 'プロンプトを保存しています。', detail: '保存が完了してから終了してください。', buttons: ['戻る'] });
+        return;
+      }
+      if (edit.dirty) {
+        const choice = await dialog.showMessageBox(mainWindow, { type: 'question', message: '未保存の変更を破棄して終了しますか？', buttons: ['編集を続ける', '破棄して終了'], defaultId: 0, cancelId: 0 });
+        if (choice.response !== 1) return;
+      }
+    }
+  } catch (error) {
+    log(`Could not inspect prompt draft: ${error.message}`);
+  } finally {
+    checkingUnsaved = false;
   }
-});
+  quitting = true;
+  mainWindow?.setTitle('保存して終了中 — Local Meeting Notes');
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.executeJavaScript("window.dispatchEvent(new Event('meeting-app-closing'));").catch(() => {});
+  }
+  try {
+    if (backendURL) await fetch(`${backendURL}/api/shutdown`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  } catch (error) { log(error.message); }
+  // EOF is also the backend's orderly-shutdown signal; never kill a WAV writer.
+  if (backend?.stdin && !backend.stdin.destroyed) backend.stdin.end();
+}
+if (!app.requestSingleInstanceLock()) app.quit();
+else {
+  app.on('second-instance', () => { mainWindow?.show(); mainWindow?.focus(); });
+  app.on('before-quit', event => {
+    if (backend && !backendStopped) { event.preventDefault(); void stopBackend(); }
+  });
+  app.on('window-all-closed', () => app.quit());
+  app.whenReady().then(async () => {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    logStream = fs.createWriteStream(path.join(app.getPath('userData'), 'electron.log'), { flags: 'a' });
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { label: app.name, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] },
+      { label: '編集', submenu: [{ role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
+      { label: 'ウインドウ', submenu: [{ role: 'minimize' }, { role: 'zoom' }] }
+    ]));
+    try { await startBackend(); createWindow(); }
+    catch (error) { dialog.showErrorBox('起動できませんでした', error.message); app.quit(); }
+  });
+}

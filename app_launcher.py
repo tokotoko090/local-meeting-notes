@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import multiprocessing
 
 
 def main() -> int:
@@ -16,4 +17,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Frozen multiprocessing workers must not fall through into the HTTP server.
+    multiprocessing.freeze_support()
     raise SystemExit(main())

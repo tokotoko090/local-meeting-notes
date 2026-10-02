@@ -1,7 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from pathlib import Path
-
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 
@@ -9,8 +7,7 @@ datas = [
     ("dist", "dist"),
 ]
 
-if Path("vendor").exists():
-    datas.append(("vendor", "vendor"))
+# NSIS installs ffmpeg beside the executable, outside PyInstaller's temporary tree.
 
 for package_name in ("faster_whisper", "tokenizers", "huggingface_hub", "onnxruntime"):
     datas += collect_data_files(package_name)

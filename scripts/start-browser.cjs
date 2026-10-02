@@ -2,11 +2,12 @@ const { spawn } = require("node:child_process");
 const { execFile } = require("node:child_process");
 const http = require("node:http");
 const path = require("node:path");
+const fs = require("node:fs");
 
 const root = path.resolve(__dirname, "..");
 const port = 5173;
 const apiPort = 8765;
-const requiredApiVersion = "0.1.5";
+const requiredApiVersion = require("../package.json").version;
 const viteBin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "vite.cmd" : "vite");
 
 function waitFor(url, retries = 80) {
@@ -113,7 +114,8 @@ process.on("SIGTERM", () => {
 
 Promise.all([
   ensureFreshApiPort().then(() => {
-    api = spawn("python", ["backend/server.py"], {
+    const venvPython = path.join(root, process.platform === "darwin" ? ".venv-mlx" : ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+    api = spawn(fs.existsSync(venvPython) ? venvPython : (process.platform === "win32" ? "python" : "python3"), ["backend/server.py"], {
       cwd: root,
       stdio: "inherit",
       env: commonEnv
@@ -133,6 +135,7 @@ Promise.all([
   .then(() => {
     const url = `http://127.0.0.1:${port}`;
     console.log(`Local Meeting Notes is ready: ${url}`);
+    if (process.platform === "darwin") spawn("open", [url], { stdio: "ignore" }).unref();
     if (process.platform === "win32") {
       spawn("cmd.exe", ["/c", "start", "", url], { detached: true, stdio: "ignore" }).unref();
     }

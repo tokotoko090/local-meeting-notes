@@ -1,0 +1,20 @@
+import { LevelMeter } from "./LevelMeter";
+import { Check, CheckCircle2, Copy, FileText, FolderOpen, LoaderCircle, Mic, Plus, Square, Volume2 } from "lucide-react";
+import { formatElapsed, type MeetingApp } from "../useMeetingApp";
+
+export function ActiveSession({ app }: { app: MeetingApp }) {
+  const recording = app.state === "recording";
+  const starting = app.state === "starting";
+  const steps = ["モデルを準備", "マイクを文字起こし", "再生音を文字起こし", "結果を作成"];
+  const stepIndex = ({ prepare: 0, model: 0, mic: 1, system: 2, files: 3, done: 4 } as Record<string, number>)[app.stage] ?? 0;
+  return <section className="active-session" aria-label="録音と処理の状態">
+    <div className={`session-symbol ${recording ? "is-recording" : ""}`}>{recording ? <Mic size={28} /> : <LoaderCircle size={28} className="spinner" />}</div>
+    <h2>{app.closing ? "保存して終了しています" : recording ? "会話を録音しています" : starting ? "録音を準備しています" : "文字起こししています"}</h2>
+    {recording ? <><div className="elapsed" aria-label={`録音時間 ${formatElapsed(app.elapsed)}`}>{formatElapsed(app.elapsed)}</div><p className="session-description">マイクと再生音を別々に保存しています。</p><div className="active-sources"><span title={app.micDevice}><Mic size={14} />{app.micDevice || "マイク"}</span><span title={app.systemDevice}><Volume2 size={14} />{app.systemDevice || "再生音"}</span></div>{app.capabilities?.platform === "win32" && app.capabilities.audio_monitor && <div className="recording-levels"><LevelMeter label="マイク" level={app.audioLevels.mic} /><LevelMeter label="PC音声" level={app.audioLevels.system} /></div>}<button className="primary stop-action" onClick={app.stopRecording} disabled={app.closing}><Square size={16} fill="currentColor" />録音を停止して文字起こし</button></> : <><p className="session-description">{app.closing ? "処理が終わるまで、そのままお待ちください。" : starting ? (app.capabilities?.platform === "darwin" ? "初回はmacOSのアクセス許可を確認してください。" : "音声デバイスを準備しています。") : "音声を外部に送らず、このコンピュータで処理しています。"}</p>{!starting && <ol className="process-steps" aria-label="処理の進行状況">{steps.map((step, index) => <li key={step} className={index < stepIndex ? "finished" : index === stepIndex ? "current" : "pending"}>{index < stepIndex ? <Check size={15} /> : index === stepIndex ? <LoaderCircle size={15} className="spinner" /> : <span className="step-dot" />}<span>{step}</span></li>)}</ol>}<p className="processing-caption">{app.stage === "model" ? "初回のモデル取得には時間がかかることがあります。" : app.model}</p></>}
+    {app.error && <p role="alert" className="error-message">{app.error}</p>}
+  </section>;
+}
+
+export function SessionResult({ app, onNew, onEdit }: { app: MeetingApp; onNew: () => void; onEdit: () => void }) {
+  return <section className="result-session" aria-label="処理結果"><div className="result-heading"><div className="result-symbol"><CheckCircle2 size={25} /></div><div><h2>文字起こしができました</h2></div></div><p className="result-intro">プロンプトをChatGPTに貼り付けて、議事録の作成へ。</p><button className="primary result-copy" onClick={app.copyPrompt} disabled={!app.promptReady || app.closing}><Copy size={17} />{app.copyStatus || "ChatGPT用プロンプトをコピー"}</button><button className="text-button result-edit" onClick={onEdit} disabled={!app.promptReady || app.busy}>プロンプトを編集</button><p className="copy-feedback" role="status">{app.copyStatus ? "ChatGPTに貼り付けてお使いください。" : app.promptReady ? "文字起こしと議事録の作成指示をまとめてコピーします。" : "保存ファイルを確認してください。"}</p><div className="result-files"><div><Mic size={17} /><span><strong>mic.wav</strong><small>{app.micDevice || "マイク音声"}</small></span></div><div><Volume2 size={17} /><span><strong>system.wav</strong><small>{app.systemDevice || "再生音"}</small></span></div><div><FileText size={17} /><span><strong>transcript.md</strong><small>文字起こし</small></span></div></div><div className="result-location"><span className="eyebrow">保存先</span><p>{app.outputDir}</p></div><div className="result-actions"><button onClick={app.openFolder} disabled={!app.outputDir}><FolderOpen size={16} />保存フォルダを開く</button><button className="text-button" onClick={onNew} disabled={app.closing}><Plus size={16} />次の録音へ</button></div></section>;
+}
