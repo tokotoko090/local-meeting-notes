@@ -44,6 +44,8 @@ $exePath = Join-Path $root "dist-app\LocalMeetingNotes.exe"
 if (-not (Test-Path -LiteralPath $exePath)) {
   throw "PyInstaller did not create $exePath"
 }
+New-Item -ItemType Directory -Force -Path (Join-Path $root "dist-app\vendor") | Out-Null
+Copy-Item -LiteralPath (Join-Path $root "vendor\ffmpeg.exe") -Destination (Join-Path $root "dist-app\vendor\ffmpeg.exe") -Force
 
 $makensis = Get-Command makensis.exe -ErrorAction SilentlyContinue
 $makensisPath = if ($makensis) { $makensis.Source } else { $null }

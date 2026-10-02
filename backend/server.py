@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import base64
 import mimetypes
 import os
 import queue
@@ -41,8 +43,9 @@ if sys.platform == "darwin":
     WORK_ROOT = Path.home() / "Library" / "Application Support" / "Local Meeting Notes"
 WORK_ROOT = Path(os.environ.get("LOCAL_MEETING_NOTES_DATA_ROOT", str(WORK_ROOT)))
 PYTHON = sys.executable
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "1.0.0"
 APP_NAME = "Local Meeting Notes"
+WINDOWS_POWERSHELL = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 GITHUB_REPOSITORY = os.environ.get("LOCAL_MEETING_NOTES_REPOSITORY", "tokotoko090/local-meeting-notes")
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 INSTALLER_ASSET_RE = re.compile(r"LocalMeetingNotesSetup-[0-9A-Za-z_.-]+\.exe$", re.IGNORECASE)
@@ -68,6 +71,8 @@ WORK_ROOT.mkdir(parents=True, exist_ok=True)
 LOG_PATH = WORK_ROOT / "server.log"
 SETTINGS_PATH = WORK_ROOT / "settings.json"
 DOWNLOADED_INSTALLER: Path | None = None
+DOWNLOADED_INTEGRITY: tuple[int, str] | None = None
+UPDATE_LOCK = threading.Lock()
 GPU_RUNTIME_ROOT = WORK_ROOT / "gpu-runtime"
 GPU_RUNTIME_PACKAGES = [
     ("nvidia-cublas-cu12", "12.9.2.10"),
@@ -287,7 +292,7 @@ def latest_release_info() -> dict[str, Any]:
     selected_asset: dict[str, Any] | None = None
     for asset in release.get("assets", []):
         name = str(asset.get("name") or "")
-        if INSTALLER_ASSET_RE.match(name):
+        if name == f"LocalMeetingNotesSetup-{version}.exe" and re.fullmatch(r"\d+\.\d+\.\d+", version):
             selected_asset = asset
             break
     return {
@@ -323,14 +328,24 @@ def check_update() -> dict[str, Any]:
 
 
 def download_update() -> dict[str, Any]:
-    global DOWNLOADED_INSTALLER
+    if not UPDATE_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "An update is already in progress."}
+    try:
+        return _download_update()
+    finally:
+        UPDATE_LOCK.release()
+
+
+def _download_update() -> dict[str, Any]:
+    global DOWNLOADED_INSTALLER, DOWNLOADED_INTEGRITY
     if sys.platform == "darwin":
         return {"ok": False, "error": "Mac版の自動更新は未対応です。"}
-    if any_process_running():
+    if any_process_running() or MONITORS:
         return {"ok": False, "error": "Finish the current recording or transcription before updating."}
 
     # A failed refresh must not leave an older installer eligible to run.
     DOWNLOADED_INSTALLER = None
+    DOWNLOADED_INTEGRITY = None
     try:
         info = latest_release_info()
     except Exception as exc:  # noqa: BLE001
@@ -343,48 +358,86 @@ def download_update() -> dict[str, Any]:
 
     url = str(asset.get("browser_download_url") or "")
     name = str(asset.get("name") or f"LocalMeetingNotesSetup-{latest_version}.exe")
-    if not url:
+    size = asset.get("size")
+    digest = str(asset.get("digest") or "")
+    expected_name = f"LocalMeetingNotesSetup-{latest_version}.exe"
+    if name != expected_name or not re.fullmatch(r"\d+\.\d+\.\d+", latest_version):
+        return {"ok": False, "error": "The installer name does not match the release version."}
+    if not isinstance(size, int) or size <= 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return {"ok": False, "error": "The release is missing installer size or SHA-256 verification data."}
+    if not url.startswith("https://"):
         return {"ok": False, "error": "The latest release does not include a downloadable installer."}
 
     target_dir = Path(tempfile.gettempdir()) / "LocalMeetingNotesUpdates"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / name
+    partial = target.with_suffix(".exe.part")
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": f"LocalMeetingNotes/{SERVER_VERSION}"}), timeout=60) as response:
-            with target.open("wb") as handle:
+            with partial.open("wb") as handle:
                 shutil.copyfileobj(response, handle)
+        integrity = (size, digest.removeprefix("sha256:"))
+        verify_installer(partial, integrity)
+        os.replace(partial, target)
     except Exception as exc:  # noqa: BLE001
         try:
-            target.unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
         except OSError:
             pass
         return {"ok": False, "error": f"Could not download installer: {exc}"}
 
     DOWNLOADED_INSTALLER = target
+    DOWNLOADED_INTEGRITY = integrity
     return {"ok": True, "installer_path": str(target), "latest_version": latest_version}
 
 
+def verify_installer(path: Path, integrity: tuple[int, str]) -> None:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    if path.stat().st_size != integrity[0] or digest.hexdigest() != integrity[1]:
+        raise ValueError("Installer size or SHA-256 verification failed. Download the update again.")
+
+
 def install_update() -> dict[str, Any]:
+    if not UPDATE_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "An update is already in progress."}
+    try:
+        return _install_update()
+    finally:
+        UPDATE_LOCK.release()
+
+
+def _install_update() -> dict[str, Any]:
+    global SHUTTING_DOWN
     if sys.platform == "darwin":
         return {"ok": False, "error": "Mac版の自動更新は未対応です。"}
-    if any_process_running():
+    if any_process_running() or MONITORS:
         return {"ok": False, "error": "Finish the current recording or transcription before updating."}
     if not DOWNLOADED_INSTALLER or not DOWNLOADED_INSTALLER.exists():
         return {"ok": False, "error": "Download the update before installing it."}
     try:
+        if DOWNLOADED_INTEGRITY is None:
+            raise ValueError("Download a verified installer before updating.")
+        verify_installer(DOWNLOADED_INSTALLER, DOWNLOADED_INTEGRITY)
+        def ps_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
         launcher = (
             f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; "
             "Start-Sleep -Milliseconds 700; "
-            f"Start-Process -FilePath {json.dumps(str(DOWNLOADED_INSTALLER))} "
-            f"-WorkingDirectory {json.dumps(str(DOWNLOADED_INSTALLER.parent))}"
+            f"Start-Process -FilePath {ps_quote(str(DOWNLOADED_INSTALLER))} "
+            f"-WorkingDirectory {ps_quote(str(DOWNLOADED_INSTALLER.parent))} "
+            f"-ArgumentList {ps_quote('/D=' + str(ROOT))}"
         )
         subprocess.Popen(
-            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", launcher],
+            [WINDOWS_POWERSHELL, "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", base64.b64encode(launcher.encode("utf-16-le")).decode("ascii")],
             cwd=str(DOWNLOADED_INSTALLER.parent),
             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"Could not start installer: {exc}"}
+    SHUTTING_DOWN = True
     threading.Timer(0.2, lambda: os._exit(0)).start()
     return {"ok": True}
 
@@ -695,6 +748,8 @@ def stop_audio_monitor() -> dict[str, Any]:
 
 
 def start_audio_monitor(mic_device_index: int | None = None, system_device_index: int | None = None) -> dict[str, Any]:
+    if UPDATE_LOCK.locked():
+        return {"ok": False, "error": "Finish the update before testing audio."}
     with PROCESS_LOCK:
         if sys.platform != "win32":
             return {"ok": False, "error": "Audio monitoring is Windows-only."}
@@ -771,6 +826,8 @@ def start_recording(
     mic_device_id: str = "",
 ) -> dict[str, Any]:
     global RECORDER, LATEST_OUTPUT_DIR
+    if UPDATE_LOCK.locked():
+        return {"ok": False, "error": "Finish the update before recording."}
     stop_audio_monitor()
     if SHUTTING_DOWN or any_process_running():
         return {"ok": False, "error": "Another recording or transcription process is already running."}
@@ -825,6 +882,8 @@ def resolve_output_dir(output_dir: str) -> Path:
 
 def start_transcription(output_dir: str, model: str, transcribe_device: str) -> dict[str, Any]:
     global TRANSCRIBER, LATEST_OUTPUT_DIR
+    if UPDATE_LOCK.locked():
+        return {"ok": False, "error": "Finish the update before transcribing."}
     stop_audio_monitor()
     if SHUTTING_DOWN or any_process_running():
         return {"ok": False, "error": "Another recording or transcription process is already running."}
@@ -862,7 +921,7 @@ def read_prompt(output_dir: str) -> dict[str, Any]:
 
 def copy_text(text: str) -> dict[str, Any]:
     command = ["/usr/bin/pbcopy"] if sys.platform == "darwin" else [
-        "powershell", "-NoProfile", "-Command",
+        WINDOWS_POWERSHELL, "-NoProfile", "-Command",
         "$ErrorActionPreference = 'Stop'; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false); "
         "Set-Clipboard -Value ([Console]::In.ReadToEnd())",
     ]
@@ -959,7 +1018,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 exit 3
 """
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-STA", "-Command", script],
+        [WINDOWS_POWERSHELL, "-NoProfile", "-STA", "-Command", script],
         cwd=WORK_ROOT,
         text=True,
         capture_output=True,

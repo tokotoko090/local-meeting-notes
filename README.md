@@ -2,6 +2,8 @@
 
 Windows / macOS向けのローカル議事録作成ツールです。
 
+v1.0.0の配布対象はWindows 10 / 11の64bit版です。[最新版のインストーラー](https://github.com/tokotoko090/local-meeting-notes/releases/latest)から導入できます。Git、Python、Node.jsのインストールは不要です。Mac版のソースは維持していますが、今回のReleaseにMac版の配布物は含みません。
+
 ## Mac版（Apple Silicon / macOS 15以降）
 
 Mac版は `npm run build:mac` で作成した `Local Meeting Notes.app` をFinderから起動します。追加の音声ドライバーは不要です。初回録音時にマイクと画面収録・システムオーディオを許可してください。macOSの共有選択画面が出た場合はディスプレイを選択します。映像は保存しません。
@@ -16,12 +18,16 @@ Mac版は `npm run build:mac` で作成した `Local Meeting Notes.app` をFinde
 
 ## インストール方法
 
-1. GitHub Releasesから最新版の `LocalMeetingNotesSetup-x.y.z.exe` をダウンロードします。
+1. [GitHub Releases](https://github.com/tokotoko090/local-meeting-notes/releases/latest)から最新版の `LocalMeetingNotesSetup-x.y.z.exe` をダウンロードします。
 2. ダウンロードしたインストーラーを実行します。
 3. インストールが終わると、デスクトップとスタートメニューに `Local Meeting Notes` のショートカットが作成されます。
 4. ショートカットから起動します。
 
 インストール先は現在のWindowsユーザー配下です。管理者権限は不要です。
+
+FFmpegとアプリの実行環境は同梱しています。NVIDIA GPUがなくてもCPUで文字起こしできます。初回のモデル取得にはインターネット接続と空き容量が必要です。取得に失敗しても録音は残るため、接続を確認して「保存済み音声」から再実行してください。
+
+インストーラーはコード署名を付けていません。WindowsのSmartScreenで警告が出る場合は、入手元がこのリポジトリのReleaseであることを確認してください。
 
 ```text
 %LOCALAPPDATA%\LocalMeetingNotes
@@ -108,7 +114,9 @@ Windows版は `設定` の `アップデート` から更新できます。
 3. ダウンロード後、`インストール` を押します。
 4. インストーラーが起動するので、そのまま更新します。
 
-録音中や文字起こし中は更新できません。処理が終わってから実行してください。
+録音・文字起こし・入力テスト中は更新できません。処理を終えてから実行してください。v1.0.0以降は、ダウンロードしたインストーラーのサイズとSHA-256を検証し、インストール直前にも再検証します。検証に失敗した場合は再ダウンロードしてください。
+
+更新はアンインストールせず、同じインストール先へ上書きします。v0.2.9・v0.3.0候補からの更新でも設定と録音を保持します。
 
 ## よくあるトラブル
 
@@ -203,7 +211,7 @@ release\LocalMeetingNotesSetup-x.y.z.exe
 
 Mac・Windowsは同じソースとバージョンで管理します。WindowsのビルドはGitHub Actions、MacのビルドはApple Silicon Macで実行します。タグのpushだけでは公開しません。
 
-両OSの配布物を1つのドラフトへ集約し、同じコミット・バージョン・チェックサムと実機検証の結果を確認してから正式公開します。[ビルド・検証・公開手順](docs/RELEASING.md)を参照してください。
+v1.0.0はWindows単独で公開します。配布スクリプトの `--platforms windows` を指定し、Windowsの成果物と実機検証の結果を確認してから正式公開します。両OSを配布する場合は従来どおり同じコミット・バージョンの成果物を集約します。[ビルド・検証・公開手順](docs/RELEASING.md)を参照してください。
 
 Windowsのアプリ内更新は最新の正式リリースにある `LocalMeetingNotesSetup-x.y.z.exe` を参照するため、正式リリースにはWindowsのインストーラーを必ず含めます。Macのアプリ内更新は未対応です。
 

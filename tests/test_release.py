@@ -30,6 +30,14 @@ class ReleaseTests(unittest.TestCase):
             manifest = self.make(root, "windows-x64", "LocalMeetingNotesSetup-0.3.0.exe")
             with self.assertRaisesRegex(ValueError, "expected exactly"): assemble([manifest], root)
 
+    def test_explicit_windows_only_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.make(root, "windows-x64", "LocalMeetingNotesSetup-1.0.0.exe", version="1.0.0")
+            bundle = assemble([manifest], root, {"windows-x64"})
+            self.assertEqual(bundle["version"], "1.0.0")
+            self.assertEqual([item["platform"] for item in bundle["artifacts"]], ["windows-x64"])
+
     def test_valid_evidence_is_accepted(self):
         bundle = {"version": "0.3.0", "source_commit": SHA}
         with tempfile.TemporaryDirectory() as directory:
@@ -79,5 +87,20 @@ class ReleaseTests(unittest.TestCase):
         gh_mock.side_effect = fake_download
         with self.assertRaisesRegex(ValueError, "draft asset hash mismatch"):
             verify_draft_assets("v0.3.0", bundle)
+
+    @patch("scripts.release.gh")
+    def test_windows_draft_assets_and_manifests_are_verified(self, gh_mock):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.make(root, "windows-x64", "LocalMeetingNotesSetup-1.0.0.exe", version="1.0.0")
+            bundle = assemble([manifest], root, {"windows-x64"})
+            entry = bundle["artifacts"][0]
+            def download(*args, **kwargs):
+                target = Path(args[args.index("--dir") + 1])
+                (target / entry["artifact"]).write_bytes(b"windows-x64")
+                (target / "windows-manifest.json").write_text(json.dumps(entry), encoding="utf-8")
+                (target / "release-manifest.json").write_text(json.dumps(bundle), encoding="utf-8")
+            gh_mock.side_effect = download
+            verify_draft_assets("v1.0.0", bundle)
 
 if __name__ == "__main__": unittest.main()

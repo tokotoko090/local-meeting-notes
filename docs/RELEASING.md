@@ -1,5 +1,22 @@
 # リリース手順
 
+## Windows v1以降の単独公開
+
+v1.0.0はWindows 10 / 11 x64向けです。既存のv0.3.0タグ・ドラフトは変更しません。以下の各コマンドに `--platforms windows` を指定すると、Windows成果物と検証証跡のみを要求します。指定しない場合は従来どおり両OSが必須です。
+
+```powershell
+python scripts/release.py assemble --platforms windows --manifest-dir release --artifact-dir release --output release/release-manifest.json
+python scripts/release.py check --platforms windows --manifest-dir release --artifact-dir release --bundle release/release-manifest.json
+python scripts/release.py draft --platforms windows --manifest-dir release --artifact-dir release --bundle release/release-manifest.json
+python scripts/release.py publish --platforms windows --manifest-dir release --artifact-dir release --bundle release/release-manifest.json --windows-validation release/windows-validation.json
+```
+
+タグは成果物を生成したソースSHAに固定します。publishはmasterのソース、実機検証証跡、ドラフトから再取得した成果物のSHA-256を確認します。Windows workflowはタグ・ブランチ・PR・手動実行で候補を生成しますが、正式公開は行いません。
+
+Releaseにはインストーラー、windows-manifest.json、release-manifest.jsonを含めます。アプリ内更新はGitHubのasset digestとサイズを使い、ダウンロード後と実行直前に検証します。GitHubがdigestを返さない成果物は実行しません。v0.2.9の旧更新機能は新しいexe名も検出しますが、ハッシュ検証はv1.0.0からです。
+
+新規導入、旧版からの上書き、CPU/CUDA、録音停止、設定・録音保持を確認してください。`python scripts/verify_windows_package.py --exe <導入先>/LocalMeetingNotes.exe` は開発用PATHを外して起動・UI・設定保存・再起動・FFmpeg変換を検証します。これは別PC検証の代替証明ではありません。別PC未検証で公開する場合は、その範囲をRelease notesに明記します。
+
 ## Windows の ffmpeg と修正候補
 
 `scripts/build-windows.ps1` は `scripts/prepare_windows_ffmpeg.py` で gyan.dev の ZIP と公開 SHA-256 を取得し、ハッシュ・ZIP パス・単体 EXE の実行と WAV 変換を検証します。Chocolatey の `Get-Command ffmpeg.exe` は実体ではなく shim を返すため、コピーして配布しないでください。実体は NSIS がインストール先の `vendor/ffmpeg.exe` に配置します。PyInstaller の展開先に ffmpeg を同梱しません。

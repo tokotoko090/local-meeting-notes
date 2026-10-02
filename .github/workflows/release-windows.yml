@@ -2,6 +2,8 @@ name: Build Windows release candidate
 
 on:
   push:
+    tags:
+      - "v*"
     branches:
       - master
       - "codex/**"
@@ -52,6 +54,12 @@ jobs:
         shell: powershell
         run: |
           python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify packaged application without developer PATH
+        shell: powershell
+        run: |
+          python scripts/verify_windows_package.py --exe dist-app/LocalMeetingNotes.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create release manifest
