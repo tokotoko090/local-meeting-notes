@@ -32,6 +32,7 @@
 - Japanese documentation lint requires sudachipy and sudachidict-core. Install into an ignored isolated directory and set PYTHONPATH for lint, not into packaged requirements. Repeated Windows sentence leads in OS-specific reference sections are intentional terminology.
 - Clipboard, folder picker and update launcher must invoke `%SystemRoot%/System32/WindowsPowerShell/v1.0/powershell.exe` explicitly. Testing with only System32 in PATH exposed bare powershell lookup failures; do not reintroduce a dependency on developer PATH.
 - v1 local verification: Python 90 (88 pass/2 environment skips), UI 94/94 and prompt UI 13/13; installed PATH-isolated startup, FFmpeg conversion, old executable overwrite/data hashes, real mic/loopback stop, cached turbo CUDA/FP16 and CPU/INT8, actual Japanese/emoji clipboard and restart passed. See docs/WINDOWS-V1-VALIDATION.md. CI-generated installers still require installed validation before publication; separate-PC/Windows 10/Mac checks were not performed.
+- CI v1 package verification also exposed RUNNER~1 vs runneradmin during settings restart: resolve the existing temporary root before constructing chosen output paths. The app already canonicalizes persisted paths; never weaken persistence checks to bypass this path spelling difference.
 
 ## Verification on this host
 

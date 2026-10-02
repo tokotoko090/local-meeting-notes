@@ -23,7 +23,7 @@ def main() -> int:
     ffmpeg = exe.parent / "vendor" / "ffmpeg.exe"
     assert ffmpeg.is_file(), ffmpeg
     with tempfile.TemporaryDirectory(prefix="lmn-package-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         data = root / "日本語 設定"
         data.mkdir()
         with socket.socket() as sock:
